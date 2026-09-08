@@ -22,6 +22,11 @@ from server.routers.run_router import run_router  # noqa: E402
 from server.utils.auth import hash_password  # noqa: E402
 from server.utils.datetime_utils import utc_now  # noqa: E402
 
+# 新表模型：导入即注册进 Base.metadata（lifespan create_all 自动建表）
+from server.services.eval_service import EvaluationCase, EvaluationRun  # noqa: F401,E402
+from server.services.pg_memory_store import AgentMemory  # noqa: F401,E402
+from server.services.metric_registry import MetricRegistry  # noqa: F401,E402
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

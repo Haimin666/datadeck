@@ -41,10 +41,16 @@ def get_tool_instances_for_context(context) -> list[Any]:
     )
 
     extra_meta = get_all_extra_metadata()
+
+    def _default_category(meta) -> str:
+        return meta.category if meta else "buildin"
+
+    # 默认装配：示例 buildin + 企业数据工具（sql/omd/rag）
+    allowed_categories = {"buildin", "data"}
     buildin_tools = {
         tool.name: tool
         for tool in get_all_tool_instances()
-        if (extra_meta.get(tool.name).category if extra_meta.get(tool.name) else "buildin") == "buildin"
+        if _default_category(extra_meta.get(tool.name)) in allowed_categories
     }
     selected = getattr(context, "tools", None)
     if selected is None:

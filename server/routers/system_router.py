@@ -1,7 +1,8 @@
-"""系统路由：健康检查、运行时能力发现、品牌信息。"""
-from fastapi import APIRouter
+"""系统路由：健康检查、运行时能力发现、品牌信息、监控统计。"""
+from fastapi import APIRouter, Depends, HTTPException
 
 from server.config import settings
+from server.deps import get_required_user
 
 system = APIRouter(prefix="/system", tags=["system"])
 
@@ -14,6 +15,38 @@ async def health():
 @system.get("/ready")
 async def ready():
     return {"status": "ok", "components": {"db": "ok"}}
+
+
+def _admin_check(user) -> None:
+    if getattr(user, "role", "") not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+
+
+@system.get("/metrics/runs")
+async def metrics_runs(hours: int = 24, current_user=Depends(get_required_user)):
+    """运行统计：成功率/失败率/耗时分位（管理员）。"""
+    _admin_check(current_user)
+    from server.services.metrics_service import run_stats
+
+    return await run_stats(hours=hours)
+
+
+@system.get("/metrics/tools")
+async def metrics_tools(hours: int = 24, current_user=Depends(get_required_user)):
+    """工具调用频次与错误分布（管理员）。"""
+    _admin_check(current_user)
+    from server.services.metrics_service import tool_stats
+
+    return await tool_stats(hours=hours)
+
+
+@system.get("/metrics/components")
+async def metrics_components(current_user=Depends(get_required_user)):
+    """熔断器/缓存状态快照（管理员）。"""
+    _admin_check(current_user)
+    from server.services.metrics_service import component_stats
+
+    return component_stats()
 
 
 @system.get("/discovery")

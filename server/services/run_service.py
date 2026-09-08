@@ -24,6 +24,18 @@ from server.utils.datetime_utils import utc_now
 _running: dict[str, asyncio.Task] = {}
 
 
+async def _get_user_domain(uid: str) -> str:
+    """查用户业务域；查询失败返回空（不阻塞链路）。"""
+    try:
+        async with async_session_factory() as db:
+            r = await db.execute(sa_text(
+                "SELECT domain FROM users WHERE uid=:u LIMIT 1"), {"u": uid})
+            row = r.fetchone()
+        return (row[0] if row else "") or "default"
+    except Exception:  # noqa: BLE001
+        return "default"
+
+
 async def create_agent_run(
     *,
     query: str,
@@ -90,9 +102,20 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
         thread_id, uid, input_payload = row
         query = (input_payload or {}).get("query", "")
 
+        # 任务分类路由提示（阶段二 2.2）：确定性预分类，辅助模型选工具；不确定则无提示
+        from datadeck.agents.middlewares.task_router import routing_hint
+        hint = routing_hint(query)
+        if hint:
+            query = f"[路由提示] {hint}\n\n{query}"
+
         agent = await get_chatbot_agent()
         graph = await agent.get_graph()
         config = {"configurable": {"thread_id": thread_id, "uid": uid}}
+
+        # 业务域隔离（阶段四 4.5）：run 级注入用户 domain，工具按需读取
+        domain = await _get_user_domain(uid)
+        if domain:
+            config["configurable"]["domain"] = domain
 
         if resume_command is not None:
             await consume_graph_stream(

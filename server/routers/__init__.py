@@ -5,6 +5,8 @@ from server.routers.chat_router import chat
 from server.routers.apikey_router import apikey
 from server.routers.dashboard_router import dashboard
 from server.routers.system_router import system
+from server.routers.rag_router import rag
+from server.routers.eval_router import eval_router
 
 router = APIRouter()
 router.include_router(system)
@@ -13,3 +15,5 @@ router.include_router(agent)
 router.include_router(chat)
 router.include_router(apikey)
 router.include_router(dashboard)
+router.include_router(rag)
+router.include_router(eval_router)

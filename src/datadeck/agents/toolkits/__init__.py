@@ -2,6 +2,7 @@
 
 # @tool 注册依赖 import 副作用：buildin 工具必须在此导入才进 registry
 from . import buildin  # noqa: F401  # 注册 echo/add/sql_validate
+from . import data_tools  # noqa: F401  # 注册 sql_execute_query/omd_*/rag_search
 from .registry import (
     ToolExtraMetadata,
     get_all_extra_metadata,

@@ -27,6 +27,7 @@ class User(Base):
     uid = Column(String(64), nullable=False, unique=True, index=True)
     password_hash = Column(String(256), nullable=False)
     role = Column(String(32), nullable=False, default="user")  # user / admin / superadmin
+    domain = Column(String(64), nullable=False, default="default", server_default="default")  # 业务域隔离
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     last_login = Column(DateTime(timezone=True), nullable=True)
     is_deleted = Column(Integer, nullable=False, default=0)

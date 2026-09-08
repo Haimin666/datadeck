@@ -46,9 +46,12 @@ async def get_chatbot_agent() -> ChatbotAgent:
     global _agent
     if _agent is None:
         saver = await _init_saver()
+        from server.services.pg_memory_store import PgMemoryStore
+
         _agent = ChatbotAgent(
             model_provider=EnvModelProvider(),
             checkpointer_provider=PgCheckpointerProvider(saver),
+            memory_store=PgMemoryStore(),
         )
     return _agent
 

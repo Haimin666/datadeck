@@ -13,6 +13,9 @@ TEST_DATABASE_URL = "postgresql+asyncpg://localhost:5432/datadeck_test"
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 assert "datadeck_test" in os.environ["DATABASE_URL"], "测试库防线：必须 datadeck_test"
 
+# 测试环境与真实数据源隔离：data_selfcheck/sql_executor 不做真实外呼
+os.environ.pop("DATADECK_SQL_DSN", None)
+
 import pytest  # noqa: E402
 from langchain_core.language_models import BaseChatModel  # noqa: E402
 from langchain_core.messages import AIMessage  # noqa: E402
@@ -97,6 +100,13 @@ def app_client(monkeypatch):
     import server.services.agents_provider as ap
     import server.services.run_service as rs
     import datadeck.agents.buildin.chatbot.graph as graph_mod
+
+    # server.main import 时 load_dotenv 会把 .env 的 DATADECK_SQL_DSN 塞回环境；
+    # 测试不外呼真实数仓，import 后再次剥离（graph 中间件按需惰性读取该 env）。
+    os.environ.pop("DATADECK_SQL_DSN", None)
+    import datadeck.agents.middlewares.data_selfcheck as _dsc
+    _dsc._schema_cache["map"] = None
+    _dsc._schema_cache["at"] = 0.0
 
     # 假模型单例替换（测试经 scripted_model fixture 设脚本）
     monkeypatch.setattr(graph_mod, "load_chat_model",
