@@ -1,143 +1,328 @@
-<script setup>
-import { ref } from 'vue'
-import { ChevronDown, ChevronUp, Copy } from '@lucide/vue'
-
-const props = defineProps({
-  toolCalls: { type: Array, default: () => [] },
-  isActive: { type: Boolean, default: false }
-})
-
-const collapsed = ref(true)
-const copiedToolId = ref(null)
-
-function copyToolCall(toolCall) {
-  const text = `${toolCall.name}(${JSON.stringify(toolCall.arguments || {})})`
-  navigator.clipboard.writeText(text)
-  copiedToolId.value = toolCall.id
-  setTimeout(() => { copiedToolId.value = null }, 2000)
-}
-</script>
-
 <template>
-  <div class="tool-calls-group">
+  <div v-if="normalizedToolCalls.length > 0" class="tool-calls-container">
     <button
-      class="tool-calls-toggle"
-      :class="{ active: !collapsed }"
-      @click="collapsed = !collapsed"
+      v-if="shouldCollapseToolCalls"
+      type="button"
+      class="tool-calls-summary"
+      :class="{ 'is-expanded': areToolCallsExpanded }"
+      :aria-expanded="areToolCallsExpanded"
+      @click="toggleToolCallsExpanded"
     >
-      <component :is="collapsed ? ChevronDown : ChevronUp" :size="14" />
-      <span>工具调用 ({{ toolCalls.length }})</span>
+      <span class="summary-leading">
+        <Atom size="14" />
+      </span>
+      <span class="summary-content">
+        <span class="summary-title">{{ toolCallsSummaryTitle }}</span>
+        <span class="summary-separator" v-if="normalizedToolCalls.length > 1 && toolCallsNamesMeta"
+          >·</span
+        >
+        <span class="summary-meta" v-if="normalizedToolCalls.length > 1 && toolCallsNamesMeta">{{
+          toolCallsNamesMeta
+        }}</span>
+        <span class="summary-status-tag" v-if="statusSummary">{{ statusSummary }}</span>
+      </span>
+      <span class="summary-trailing">
+        <ChevronDown
+          :size="14"
+          class="summary-chevron"
+          :class="{ 'is-collapsed': !areToolCallsExpanded }"
+        />
+      </span>
     </button>
-    <div v-if="!collapsed" class="tool-calls-list">
-      <div
-        v-for="(tc, idx) in toolCalls"
-        :key="tc.id || idx"
-        class="tool-call-item"
-        :class="{ active: isActive && idx === toolCalls.length - 1 }"
-      >
-        <div class="tool-call-header">
-          <span class="tool-call-name">
-            <span class="tool-call-dot"></span>
-            {{ tc.name || 'tool_call' }}
-          </span>
-          <button class="copy-btn" @click="copyToolCall(tc)">
-            <Copy v-if="copiedToolId !== (tc.id || idx)" :size="12" />
-            <Check v-else :size="12" />
-          </button>
+
+    <div
+      class="tool-calls-collapse-panel"
+      :class="{ 'is-expanded': !shouldCollapseToolCalls || areToolCallsExpanded }"
+    >
+      <div class="tool-calls-collapse-inner">
+        <div class="tool-calls-panel">
+          <div
+            v-for="(toolCall, index) in normalizedToolCalls"
+            :key="toolCall.id || `${getToolCallId(toolCall)}-${index}`"
+            class="tool-call-container"
+          >
+            <ToolCallRenderer
+              :tool-call="toolCall"
+              appearance="timeline"
+              :default-expanded="false"
+            />
+          </div>
         </div>
-        <pre v-if="tc.arguments" class="tool-call-args">{{ JSON.stringify(tc.arguments, null, 2) }}</pre>
-        <pre v-if="tc.result" class="tool-call-result">{{ typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result, null, 2) }}</pre>
       </div>
     </div>
   </div>
 </template>
 
-<script>
-import { Check } from '@lucide/vue'
-export default { components: { Check } }
+<script setup>
+import { computed, ref, watch, inject } from 'vue'
+import { ChevronDown, Atom } from '@lucide/vue'
+import { storeToRefs } from 'pinia'
+import { useAgentStore } from '@/stores/agent'
+import { ToolCallRenderer } from '@/components/ToolCallingResult'
+import {
+  getToolCallId,
+  getToolName,
+  findToolInList,
+  isSubagentToolCall,
+  normalizeToolCalls
+} from '@/components/ToolCallingResult/toolRegistry'
+
+const agentStore = useAgentStore()
+const { availableTools, toolMetadata } = storeToRefs(agentStore)
+
+const activeSubagentToolCallIds = inject('activeSubagentToolCallIds', null)
+
+// task 工具结果不随流式返回，不能用 tool_call_result 判断运行中：只有「活跃」的 task 才算运行中。
+const toolRunState = (toolCall) => {
+  if (toolCall.status === 'error') return 'error'
+  if (toolCall.tool_call_result || toolCall.status === 'success') return 'completed'
+  if (isSubagentToolCall(toolCall)) {
+    if (getToolCallId(toolCall) !== 'task') return 'running'
+    return activeSubagentToolCallIds?.value?.has(String(toolCall.id)) ? 'running' : 'completed'
+  }
+  return 'running'
+}
+
+const props = defineProps({
+  toolCalls: {
+    type: Array,
+    default: () => []
+  },
+  isActive: {
+    type: Boolean,
+    default: false
+  }
+})
+
+const normalizedToolCalls = computed(() => normalizeToolCalls(props.toolCalls))
+
+const shouldCollapseToolCalls = computed(() => normalizedToolCalls.value.length > 0)
+const areToolCallsExpanded = ref(false)
+
+watch(
+  [() => normalizedToolCalls.value.length, () => props.isActive],
+  ([, isActive], [, previousActive]) => {
+    // 如果是活跃状态，强制展开
+    if (isActive) {
+      areToolCallsExpanded.value = true
+      return
+    }
+
+    // 从活跃转为非活跃（例如：正文开始输出了），则收起
+    if (previousActive === true && isActive === false) {
+      areToolCallsExpanded.value = false
+      return
+    }
+
+    // 初始化或非活跃状态下，默认保持收起
+    if (!previousActive && !isActive) {
+      areToolCallsExpanded.value = false
+    }
+  },
+  { immediate: true }
+)
+
+// 工具名称展示优先级：display_label > 完整工具元数据中的 display name > 前端兜底名称映射 > 工具 id
+const getToolCallLabel = (toolCall) => {
+  const displayLabel = String(toolCall?.display_label || '').trim()
+  if (displayLabel) return displayLabel
+
+  const toolId = getToolCallId(toolCall)
+  const toolsList = toolMetadata.value.length
+    ? toolMetadata.value
+    : availableTools.value
+      ? Object.values(availableTools.value)
+      : []
+  const tool = findToolInList(toolId, toolsList)
+  return tool ? tool.name : getToolName(toolId)
+}
+
+const toolCallsSummaryTitle = computed(() => {
+  if (normalizedToolCalls.value.length === 1) {
+    return `调用: ${getToolCallLabel(normalizedToolCalls.value[0])}`
+  }
+  return `已调用 ${normalizedToolCalls.value.length} 个工具`
+})
+
+const toolCallsNamesMeta = computed(() => {
+  const names = normalizedToolCalls.value.map(getToolCallLabel).filter(Boolean)
+  const uniqueNames = [...new Set(names)]
+  const visibleNames = uniqueNames.slice(0, 3)
+
+  if (visibleNames.length === 0) return ''
+
+  return `${visibleNames.join(' · ')}${uniqueNames.length > visibleNames.length ? ` +${uniqueNames.length - visibleNames.length}` : ''}`
+})
+
+const statusSummary = computed(() => {
+  const states = normalizedToolCalls.value.map(toolRunState)
+  const runningCount = states.filter((state) => state === 'running').length
+  const errorCount = states.filter((state) => state === 'error').length
+
+  const parts = []
+  if (errorCount > 0) parts.push(`${errorCount} 失败`)
+  if (runningCount > 0) parts.push(`${runningCount} 进行中`)
+
+  return parts.join(' · ')
+})
+
+const toggleToolCallsExpanded = () => {
+  if (!shouldCollapseToolCalls.value) return
+  areToolCallsExpanded.value = !areToolCallsExpanded.value
+}
 </script>
 
 <style lang="less" scoped>
-.tool-calls-group {
-  margin: 8px 0;
-  border: 1px solid var(--gray-100);
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.tool-calls-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.tool-calls-container {
   width: 100%;
-  padding: 8px 12px;
-  border: none;
-  background: var(--gray-50);
-  font-size: 12px;
-  color: var(--gray-600);
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.15s;
-  &:hover { background: var(--gray-100); }
-  &.active { background: var(--main-50); color: var(--main-700); }
-}
-
-.tool-calls-list { padding: 8px; display: flex; flex-direction: column; gap: 8px; }
-
-.tool-call-item {
-  padding: 8px;
-  background: var(--gray-0);
-  border: 1px solid var(--gray-100);
-  border-radius: 6px;
-  font-size: 12px;
-  &.active { border-color: var(--main-300); background: var(--main-50); }
-}
-
-.tool-call-header {
+  padding: 0;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 4px;
+  flex-direction: column;
+
+  .tool-calls-summary {
+    appearance: none;
+    width: auto;
+    max-width: 100%;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--gray-700);
+    text-align: left;
+    cursor: pointer;
+    outline: none;
+    border: none;
+    padding: 0;
+    transition: color 0.15s ease;
+    user-select: none;
+    background: transparent;
+
+    &:hover {
+      color: var(--gray-800);
+
+      .summary-chevron {
+        color: var(--gray-700);
+      }
+    }
+
+    &.is-expanded {
+      color: var(--gray-800);
+    }
+
+    .summary-leading {
+      display: inline-flex;
+      align-items: center;
+      color: var(--gray-700);
+      flex-shrink: 0;
+    }
+
+    .summary-content {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex: 1;
+      font-size: 13px;
+    }
+
+    .summary-title {
+      font-weight: 400;
+      white-space: nowrap;
+    }
+
+    .summary-separator {
+      color: var(--gray-500);
+      flex-shrink: 0;
+    }
+
+    .summary-meta {
+      color: var(--gray-600);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .summary-status-tag {
+      margin-left: 4px;
+      font-size: 11px;
+      padding: 0 4px;
+      color: var(--gray-600);
+      border-radius: 4px;
+      white-space: nowrap;
+      font-weight: normal;
+    }
+
+    .summary-trailing {
+      display: inline-flex;
+      align-items: center;
+      color: var(--gray-500);
+      flex-shrink: 0;
+    }
+
+    .summary-chevron {
+      flex-shrink: 0;
+      color: var(--gray-400);
+      transition:
+        transform 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+        color 0.18s ease;
+
+      &.is-collapsed {
+        transform: rotate(-90deg);
+      }
+    }
+  }
+
+  .tool-calls-collapse-panel {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition:
+      grid-template-rows 0.24s cubic-bezier(0.16, 1, 0.3, 1),
+      visibility 0.24s ease;
+    visibility: hidden;
+    min-width: 0;
+
+    &.is-expanded {
+      grid-template-rows: 1fr;
+      visibility: visible;
+    }
+  }
+
+  .tool-calls-collapse-inner {
+    overflow: hidden;
+    min-height: 0;
+    opacity: 0;
+    transform: translateY(-4px);
+    transition:
+      opacity 0.2s ease,
+      transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .tool-calls-collapse-panel.is-expanded .tool-calls-collapse-inner {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .tool-calls-panel {
+    border-top: 1px solid var(--gray-100);
+    padding-top: 6px;
+    margin-top: 6px;
+    margin-bottom: 8px;
+  }
+
+  .tool-call-container {
+    margin-bottom: 4px;
+    &:last-child {
+      margin-bottom: 0;
+    }
+  }
 }
 
-.tool-call-name {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-  color: var(--gray-700);
+@media (prefers-reduced-motion: reduce) {
+  .tool-calls-container {
+    .tool-calls-summary .summary-chevron,
+    .tool-calls-collapse-panel,
+    .tool-calls-collapse-inner {
+      transition: none;
+    }
+  }
 }
-
-.tool-call-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--main-500);
-}
-
-.copy-btn {
-  display: flex;
-  align-items: center;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  color: var(--gray-400);
-  padding: 2px;
-  &:hover { color: var(--gray-600); }
-}
-
-.tool-call-args,
-.tool-call-result {
-  margin: 4px 0 0;
-  padding: 8px;
-  background: var(--gray-900);
-  color: var(--gray-100);
-  border-radius: 4px;
-  font-size: 11px;
-  overflow-x: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-.tool-call-result { background: var(--gray-800); color: var(--color-success-400); }
 </style>

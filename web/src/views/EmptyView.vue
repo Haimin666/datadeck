@@ -1,13 +1,29 @@
 <template>
-  <div class="empty-view">
-    <a-result status="404" title="页面不存在" sub-title="您访问的页面不存在">
-      <template #extra>
-        <a-button type="primary" @click="$router.push('/agent')">返回首页</a-button>
-      </template>
-    </a-result>
+  <div class="not-found">
+    <h1>404 - 页面还没做</h1>
+    <p>Sorry, Yemian has not been zuoed.</p>
   </div>
 </template>
 
+<script setup></script>
+
 <style scoped>
-.empty-view { display: flex; align-items: center; justify-content: center; height: 100vh; }
+.not-found {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 80vh;
+  text-align: center;
+}
+
+.not-found h1 {
+  font-size: 2rem;
+  margin-bottom: 1rem;
+}
+
+.not-found p {
+  font-size: 1.5rem;
+  margin-bottom: 2rem;
+}
 </style>

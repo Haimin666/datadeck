@@ -1,18 +1,21 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { agentApi } from '@/apis'
-
-export const BUILTIN_AGENT_ID = 'default-chatbot'
-
-export function isBuiltinAgent(agent) {
-  return agent?.is_builtin || agent?.id === BUILTIN_AGENT_ID || agent?.slug === BUILTIN_AGENT_ID
-}
+import { agentApi, databaseApi, mcpApi, skillApi, toolApi } from '@/apis'
+import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
+import { isDefaultAllAgentResourceKind } from '@/utils/agentConfigUtils'
+import { handleChatError } from '@/utils/errorHandler'
 
 function normalizeAgent(agent) {
   const agentId = agent?.agent_id || agent?.slug || agent?.id
   return agentId
     ? { ...agent, id: agentId, agent_id: agentId, slug: agent?.slug || agentId }
     : agent
+}
+
+export const BUILTIN_AGENT_ID = 'default-chatbot'
+
+export function isBuiltinAgent(agent) {
+  return agent?.is_builtin || agent?.id === BUILTIN_AGENT_ID || agent?.slug === BUILTIN_AGENT_ID
 }
 
 function sortAgents(agents) {
@@ -23,92 +26,319 @@ function sortAgents(agents) {
 }
 
 function getPreferredAgentId(agents, persistedId) {
-  if (persistedId && agents.some((a) => a.id === persistedId)) return persistedId
-  return agents.find(isBuiltinAgent)?.id || agents[0]?.id || null
+  const chatAgents = agents.filter((agent) => !agent.is_subagent)
+  if (persistedId && chatAgents.some((agent) => agent.id === persistedId)) return persistedId
+  return chatAgents.find(isBuiltinAgent)?.id || chatAgents[0]?.id || null
 }
 
-export const useAgentStore = defineStore('agent', () => {
-  const agents = ref([])
-  const selectedAgentId = ref(localStorage.getItem('selected_agent_id') || null)
-  const isLoadingAgents = ref(false)
-  const isLoadingConfig = ref(false)
-  const isLoadingAgentDetail = ref(false)
-  const error = ref(null)
-  const isInitialized = ref(false)
-  const isInitializing = ref(false)
+function extractContext(agent) {
+  const configJson = agent?.config_json || {}
+  return { ...(configJson.context || configJson || {}) }
+}
 
-  const selectedAgent = computed(() => {
-    const agentId = selectedAgentId.value
-    return agentId ? agents.value.find((a) => a.id === agentId) || null : null
-  })
+export const useAgentStore = defineStore(
+  'agent',
+  () => {
+    const agents = ref([])
+    const selectedAgentId = ref(null)
 
-  async function fetchAgents() {
-    isLoadingAgents.value = true
-    error.value = null
-    try {
-      const data = await agentApi.getAgents()
-      agents.value = sortAgents((data?.agents || data || []).map(normalizeAgent))
-      const persisted = localStorage.getItem('selected_agent_id')
-      if (persisted && agents.value.some((a) => a.id === persisted)) {
-        selectedAgentId.value = persisted
-      } else {
-        selectedAgentId.value = getPreferredAgentId(agents.value, persisted)
+    const availableKnowledgeBases = ref([])
+    const availableMcps = ref([])
+    const availableSkills = ref([])
+    // 完整工具元数据（含 buildin / knowledge 等全部分类的 display_name），用于工具名称展示映射
+    const toolMetadata = ref([])
+
+    const agentConfig = ref({})
+    const originalAgentConfig = ref({})
+    const agentDetails = ref({})
+
+    const isLoadingAgents = ref(false)
+    const isLoadingConfig = ref(false)
+    const isLoadingAgentDetail = ref(false)
+    const error = ref(null)
+    const isInitialized = ref(false)
+    const isInitializing = ref(false)
+
+    const selectedAgent = computed(() => {
+      const agentId = selectedAgentId.value
+      return agentId
+        ? agentDetails.value[agentId] || agents.value.find((a) => a.id === agentId) || null
+        : null
+    })
+
+    const agentsList = computed(() => agents.value)
+
+    const configurableItems = computed(() => {
+      const items = { ...(selectedAgent.value?.configurable_items || {}) }
+      Object.keys(items).forEach((key) => {
+        const item = items[key]
+        if (item?.x_oap_ui_config) {
+          items[key] = { ...item, ...item.x_oap_ui_config }
+          delete items[key].x_oap_ui_config
+        }
+      })
+      return items
+    })
+
+    const availableTools = computed(() => configurableItems.value.tools?.options || [])
+    const hasConfigChanges = computed(
+      () => JSON.stringify(agentConfig.value) !== JSON.stringify(originalAgentConfig.value)
+    )
+
+    async function fetchMentionResources() {
+      try {
+        const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
+        await runtimeCapabilitiesStore.ensureLoaded()
+        const [dbsRes, mcpsRes, skillsRes] = await Promise.all([
+          runtimeCapabilitiesStore.knowledgeEnabled
+            ? databaseApi.getAccessibleDatabases().catch(() => ({ databases: [] }))
+            : Promise.resolve({ databases: [] }),
+          mcpApi.getMcpServers().catch(() => ({ data: [] })),
+          skillApi.listAccessibleSkills().catch(() => ({ data: [] }))
+        ])
+        availableKnowledgeBases.value = dbsRes.databases || []
+        availableMcps.value = mcpsRes.data || []
+        availableSkills.value = skillsRes.data || []
+      } catch (e) {
+        console.warn('Failed to fetch mention resources:', e)
       }
-      return agents.value
-    } catch (err) {
-      error.value = err
-      throw err
-    } finally {
+    }
+
+    async function fetchToolMetadata() {
+      try {
+        const result = await toolApi.getTools()
+        toolMetadata.value = result?.data || []
+      } catch (e) {
+        console.warn('Failed to fetch tool metadata:', e)
+        toolMetadata.value = []
+      }
+    }
+
+    async function initialize() {
+      if (isInitialized.value || isInitializing.value) return
+      isInitializing.value = true
+      try {
+        await Promise.all([fetchAgents(), fetchMentionResources(), fetchToolMetadata()])
+
+        const targetAgentId = getPreferredAgentId(agents.value, selectedAgentId.value)
+        if (targetAgentId) {
+          await selectAgent(targetAgentId)
+        }
+        isInitialized.value = true
+      } catch (err) {
+        console.error('Failed to initialize agent store:', err)
+        handleChatError(err, 'initialize')
+        error.value = err.message
+      } finally {
+        isInitializing.value = false
+      }
+    }
+
+    async function fetchAgents({ includeSubagents = false } = {}) {
+      isLoadingAgents.value = true
+      error.value = null
+      try {
+        const response = await agentApi.getAgents({ includeSubagents })
+        agents.value = sortAgents((response.agents || []).map(normalizeAgent))
+      } catch (err) {
+        console.error('Failed to fetch agents:', err)
+        handleChatError(err, 'fetch')
+        error.value = err.message
+        throw err
+      } finally {
+        isLoadingAgents.value = false
+      }
+    }
+
+    function applyConfigDefaults(loadedConfig, configItems = configurableItems.value) {
+      const items = { ...configItems }
+      Object.keys(items).forEach((key) => {
+        const item = items[key]?.x_oap_ui_config
+          ? { ...items[key], ...items[key].x_oap_ui_config }
+          : items[key]
+        const isDefaultAllList = isDefaultAllAgentResourceKind(item?.kind)
+        if (loadedConfig[key] === undefined || (loadedConfig[key] === null && !isDefaultAllList)) {
+          if (item.default !== undefined) loadedConfig[key] = item.default
+        }
+        if (
+          loadedConfig[key] !== undefined &&
+          loadedConfig[key] !== null &&
+          loadedConfig[key] !== '' &&
+          (item?.type === 'number' || item?.type === 'int' || item?.type === 'float')
+        ) {
+          const numericValue = Number(loadedConfig[key])
+          if (!Number.isNaN(numericValue)) {
+            loadedConfig[key] = item.type === 'int' ? Math.trunc(numericValue) : numericValue
+          }
+        }
+      })
+      return loadedConfig
+    }
+
+    async function fetchAgentDetail(agentId, forceRefresh = false) {
+      if (!agentId) return null
+      if (!forceRefresh && agentDetails.value[agentId]) return agentDetails.value[agentId]
+
+      isLoadingAgentDetail.value = true
+      error.value = null
+      try {
+        const response = await agentApi.getAgentDetail(agentId)
+        const agent = normalizeAgent(response.agent || response)
+        agentDetails.value[agent.id] = agent
+        return agent
+      } catch (err) {
+        console.error(`Failed to fetch agent detail for ${agentId}:`, err)
+        handleChatError(err, 'fetch')
+        error.value = err.message
+        throw err
+      } finally {
+        isLoadingAgentDetail.value = false
+      }
+    }
+
+    async function selectAgent(agentId, { allowSubagent = false } = {}) {
+      if (!agentId) return
+      let knownAgent = agentDetails.value[agentId] || agents.value.find((a) => a.id === agentId)
+      if (!knownAgent) {
+        knownAgent = await fetchAgentDetail(agentId)
+      }
+      if (knownAgent?.is_subagent && !allowSubagent) return
+      isLoadingConfig.value = true
+      try {
+        const detail = agentDetails.value[agentId] || (await fetchAgentDetail(agentId))
+        const loadedConfig = applyConfigDefaults(
+          extractContext(detail),
+          detail?.configurable_items || {}
+        )
+        selectedAgentId.value = agentId
+        agentConfig.value = loadedConfig
+        originalAgentConfig.value = { ...loadedConfig }
+      } finally {
+        isLoadingConfig.value = false
+      }
+    }
+
+    async function saveAgentConfig() {
+      const targetAgentId = selectedAgentId.value
+      if (!targetAgentId) return
+      try {
+        const response = await agentApi.updateAgent(targetAgentId, {
+          config_json: { context: agentConfig.value }
+        })
+        const updated = normalizeAgent(response.agent)
+        agentDetails.value[targetAgentId] = updated
+        const index = agents.value.findIndex((item) => item.id === targetAgentId)
+        if (index >= 0) agents.value.splice(index, 1, updated)
+        originalAgentConfig.value = { ...agentConfig.value }
+      } catch (err) {
+        console.error('Failed to save agent config:', err)
+        handleChatError(err, 'save')
+        error.value = err.message
+        throw err
+      }
+    }
+
+    async function createAgent(payload) {
+      const response = await agentApi.createAgent(payload)
+      const created = normalizeAgent(response.agent)
+      if (created?.id) {
+        agentDetails.value[created.id] = created
+        agents.value = sortAgents([
+          created,
+          ...agents.value.filter((item) => item.id !== created.id)
+        ])
+        if (!created.is_subagent) await selectAgent(created.id)
+      }
+      return created
+    }
+
+    async function updateAgentProfile(agentId, payload) {
+      const response = await agentApi.updateAgent(agentId, payload)
+      const updated = normalizeAgent(response.agent)
+      agentDetails.value[updated.id] = updated
+      const index = agents.value.findIndex((item) => item.id === updated.id)
+      if (index >= 0) agents.value.splice(index, 1, updated)
+      return updated
+    }
+
+    async function deleteAgent(agentId) {
+      await agentApi.deleteAgent(agentId)
+      agents.value = agents.value.filter((item) => item.id !== agentId)
+      delete agentDetails.value[agentId]
+      if (selectedAgentId.value === agentId) {
+        selectedAgentId.value = null
+        agentConfig.value = {}
+        originalAgentConfig.value = {}
+        const nextAgentId = getPreferredAgentId(agents.value)
+        if (nextAgentId) await selectAgent(nextAgentId)
+      }
+    }
+
+    function resetAgentConfig() {
+      agentConfig.value = { ...originalAgentConfig.value }
+    }
+
+    function updateAgentConfig(updates) {
+      Object.assign(agentConfig.value, updates)
+    }
+
+    function reset() {
+      agents.value = []
+      selectedAgentId.value = null
+      availableKnowledgeBases.value = []
+      availableMcps.value = []
+      availableSkills.value = []
+      toolMetadata.value = []
+      agentConfig.value = {}
+      originalAgentConfig.value = {}
+      agentDetails.value = {}
       isLoadingAgents.value = false
-    }
-  }
-
-  async function fetchAgentDetail(agentId, force = false) {
-    if (!force && agentDetails.value[agentId]) return agentDetails.value[agentId]
-    isLoadingAgentDetail.value = true
-    try {
-      const data = await agentApi.getAgentDetail(agentId)
-      const normalized = normalizeAgent(data)
-      agentDetails.value[normalized.id] = normalized
-      return normalized
-    } finally {
+      isLoadingConfig.value = false
       isLoadingAgentDetail.value = false
-    }
-  }
-
-  async function initialize() {
-    if (isInitialized.value) return
-    if (isInitializing.value) {
-      while (isInitializing.value) await new Promise((r) => setTimeout(r, 100))
-      return
-    }
-    isInitializing.value = true
-    try {
-      await fetchAgents()
-      isInitialized.value = true
-    } finally {
+      error.value = null
+      isInitialized.value = false
       isInitializing.value = false
     }
-  }
 
-  function setSelectedAgent(agentId) {
-    selectedAgentId.value = agentId
-    localStorage.setItem('selected_agent_id', agentId)
+    return {
+      agents,
+      selectedAgentId,
+      availableKnowledgeBases,
+      availableMcps,
+      availableSkills,
+      toolMetadata,
+      agentConfig,
+      originalAgentConfig,
+      agentDetails,
+      isLoadingAgents,
+      isLoadingConfig,
+      isLoadingAgentDetail,
+      error,
+      isInitialized,
+      selectedAgent,
+      agentsList,
+      configurableItems,
+      availableTools,
+      hasConfigChanges,
+      initialize,
+      fetchAgents,
+      fetchAgentDetail,
+      fetchMentionResources,
+      selectAgent,
+      saveAgentConfig,
+      createAgent,
+      updateAgentProfile,
+      deleteAgent,
+      resetAgentConfig,
+      updateAgentConfig,
+      reset
+    }
+  },
+  {
+    persist: {
+      key: 'agent-store',
+      storage: localStorage,
+      pick: ['selectedAgentId']
+    }
   }
-
-  function reset() {
-    agents.value = []
-    selectedAgentId.value = null
-    agentDetails.value = {}
-    isInitialized.value = false
-    error.value = null
-  }
-
-  const agentDetails = ref({})
-
-  return {
-    agents, selectedAgentId, isLoadingAgents, isLoadingConfig, isLoadingAgentDetail,
-    error, isInitialized, selectedAgent, agentDetails,
-    fetchAgents, fetchAgentDetail, initialize, setSelectedAgent, reset
-  }
-})
+)

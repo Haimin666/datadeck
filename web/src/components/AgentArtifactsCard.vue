@@ -1,148 +1,325 @@
+<template>
+  <section v-if="normalizedArtifacts.length" class="artifacts-list">
+    <div v-for="file in normalizedArtifacts" :key="file.path" class="artifact-card">
+      <button
+        type="button"
+        class="item-main"
+        :title="`打开 ${file.name}`"
+        @click="openPreview(file)"
+      >
+        <FileTypeIcon :name="file.path" :size="20" class="item-icon" />
+        <div class="item-meta">
+          <div class="item-name">{{ file.name }}</div>
+          <div class="item-desc">{{ getFileMetaLabel(file.path) }}</div>
+        </div>
+      </button>
+      <div class="item-actions">
+        <button class="item-action-btn" title="下载" @click.stop="downloadFile(file)">
+          <Download :size="15" />
+        </button>
+        <button
+          class="item-action-btn"
+          :title="isSaving(file.path) ? '保存中' : '保存到个人空间'"
+          :disabled="isSaving(file.path)"
+          @click.stop="saveToWorkspace(file)"
+        >
+          <LoaderCircle v-if="isSaving(file.path)" :size="15" class="item-action-spin" />
+          <Save v-else :size="15" />
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <a-modal
+    :open="saveDialogOpen"
+    title="保存交付物"
+    ok-text="保存"
+    cancel-text="取消"
+    :ok-button-props="{ disabled: !selectedDestination || pickerLoading }"
+    :confirm-loading="pendingSaveFile ? isSaving(pendingSaveFile.path) : false"
+    @ok="confirmSave"
+    @cancel="closeSaveDialog"
+  >
+    <p class="save-dialog-hint">选择保存到个人工作区的目录</p>
+    <WorkspacePathPicker
+      v-model="selectedDestination"
+      selection-mode="directory"
+      :active="saveDialogOpen"
+      :disabled="pendingSaveFile ? isSaving(pendingSaveFile.path) : false"
+      @loading-change="pickerLoading = $event"
+    />
+  </a-modal>
+</template>
+
 <script setup>
-import { ref } from 'vue'
-import { Download, Eye } from '@lucide/vue'
-import { agentApi } from '@/apis'
+import { computed, ref } from 'vue'
+import { message } from 'ant-design-vue'
+import { Download, LoaderCircle, Save } from '@lucide/vue'
+import { threadApi } from '@/apis/agent_api'
+import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
+import WorkspacePathPicker from '@/components/WorkspacePathPicker.vue'
 
 const props = defineProps({
-  artifacts: { type: Array, default: () => [] },
-  threadId: { type: String, default: '' }
+  artifacts: {
+    type: Array,
+    default: () => []
+  },
+  threadId: {
+    type: String,
+    default: null
+  }
 })
 const emit = defineEmits(['saved', 'open-preview'])
 
-const previewPath = ref(null)
+const normalizedArtifacts = computed(() =>
+  (props.artifacts || [])
+    .filter((path) => typeof path === 'string' && path.trim())
+    .map((path) => {
+      const normalizedPath = path.trim()
+      return {
+        path: normalizedPath,
+        name: normalizedPath.split('/').pop() || normalizedPath
+      }
+    })
+)
+const savingState = ref({})
+const saveDialogOpen = ref(false)
+const pendingSaveFile = ref(null)
+const selectedDestination = ref('/saved_artifacts')
+const pickerLoading = ref(false)
 
-async function handleDownload(artifact) {
-  if (!props.threadId || !artifact.path) return
+const parseDownloadFilename = (contentDisposition) => {
+  if (!contentDisposition) return ''
+
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match && utf8Match[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1])
+    } catch (error) {
+      console.warn('解析 UTF-8 文件名失败:', error)
+    }
+  }
+
+  const asciiMatch = contentDisposition.match(/filename="?([^";]+)"?/i)
+  return asciiMatch?.[1] || ''
+}
+
+const getFileMetaLabel = (path) => {
+  const filename =
+    String(path || '')
+      .split('/')
+      .pop() || ''
+  if (!filename.includes('.')) return '交付文件'
+
+  const extension = filename.split('.').pop()
+  return extension ? `交付文件 · ${extension.toUpperCase()}` : '交付文件'
+}
+
+const openPreview = (file) => {
+  emit('open-preview', { ...file })
+}
+
+const downloadFile = async (file) => {
+  if (!props.threadId || !file?.path) return
+
   try {
-    const response = await agentApi.downloadThreadArtifact(props.threadId, artifact.path)
+    const response = await threadApi.downloadThreadArtifact(props.threadId, file.path)
     const blob = await response.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = artifact.name || artifact.path.split('/').pop() || 'download'
-    a.click()
-    URL.revokeObjectURL(url)
-  } catch (e) {
-    console.error('下载失败:', e)
+    const contentDisposition =
+      response.headers.get('Content-Disposition') || response.headers.get('content-disposition')
+    const filename = parseDownloadFilename(contentDisposition) || file.name
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+  } catch (error) {
+    message.error(error?.message || '下载文件失败')
   }
 }
 
-async function handlePreview(artifact) {
-  if (!props.threadId || !artifact.path) return
-  previewPath.value = artifact.path
-  emit('open-preview', artifact)
+const isSaving = (path) => !!savingState.value[path]
+
+const setSaving = (path, saving) => {
+  savingState.value = {
+    ...savingState.value,
+    [path]: saving
+  }
+}
+
+const saveToWorkspace = (file) => {
+  if (!props.threadId || !file?.path || isSaving(file.path)) {
+    return
+  }
+  pendingSaveFile.value = file
+  selectedDestination.value = '/saved_artifacts'
+  saveDialogOpen.value = true
+}
+
+const closeSaveDialog = () => {
+  if (pendingSaveFile.value && isSaving(pendingSaveFile.value.path)) return
+  saveDialogOpen.value = false
+  pendingSaveFile.value = null
+}
+
+const confirmSave = async () => {
+  const file = pendingSaveFile.value
+  if (!props.threadId || !file?.path || !selectedDestination.value || isSaving(file.path)) return
+
+  setSaving(file.path, true)
+  try {
+    const result = await threadApi.saveThreadArtifactToWorkspace(
+      props.threadId,
+      file.path,
+      selectedDestination.value
+    )
+    message.success(`已保存到个人空间：${result.saved_path}`)
+    emit('saved', result)
+    saveDialogOpen.value = false
+    pendingSaveFile.value = null
+  } catch (error) {
+    message.error(error?.message || '保存到个人空间失败')
+  } finally {
+    setSaving(file.path, false)
+  }
 }
 </script>
 
-<template>
-  <div v-if="artifacts.length" class="artifacts-card">
-    <div class="artifacts-header">
-      <span class="artifacts-title">交付物</span>
-      <span class="artifacts-count">{{ artifacts.length }}</span>
-    </div>
-    <div class="artifacts-list">
-      <div
-        v-for="(artifact, idx) in artifacts"
-        :key="idx"
-        class="artifact-item"
-      >
-        <div class="artifact-info">
-          <span class="artifact-name">{{ artifact.name || artifact.path?.split('/').pop() || '文件' }}</span>
-          <span v-if="artifact.size" class="artifact-size">{{ formatSize(artifact.size) }}</span>
-        </div>
-        <div class="artifact-actions">
-          <button class="action-btn" title="预览" @click="handlePreview(artifact)">
-            <Eye :size="14" />
-          </button>
-          <button class="action-btn" title="下载" @click="handleDownload(artifact)">
-            <Download :size="14" />
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-</template>
-
-<script>
-function formatSize(bytes) {
-  if (!bytes) return ''
-  const units = ['B', 'KB', 'MB', 'GB']
-  let i = 0
-  let size = bytes
-  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++ }
-  return `${size.toFixed(1)} ${units[i]}`
-}
-export default { methods: { formatSize } }
-</script>
-
-<style lang="less" scoped>
-.artifacts-card {
-  margin: 12px 16px;
-  border: 1px solid var(--gray-100);
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.artifacts-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  background: var(--gray-50);
-  border-bottom: 1px solid var(--gray-100);
-}
-
-.artifacts-title { font-size: 12px; font-weight: 600; color: var(--gray-600); }
-.artifacts-count {
-  font-size: 11px;
-  padding: 1px 6px;
-  background: var(--gray-100);
-  border-radius: 10px;
-  color: var(--gray-500);
-}
-
-.artifacts-list { padding: 8px; display: flex; flex-direction: column; gap: 4px; }
-
-.artifact-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 10px;
-  border-radius: 6px;
-  transition: background 0.15s;
-  &:hover { background: var(--gray-50); }
-}
-
-.artifact-info {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.artifact-name {
+<style scoped lang="less">
+.save-dialog-hint {
+  margin-bottom: 12px;
+  color: var(--color-text-secondary);
   font-size: 13px;
-  color: var(--gray-700);
+}
+
+.artifacts-list {
+  width: 100%;
+  margin: 8px 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.artifact-card {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border: 1px solid var(--gray-150);
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--gray-25) 0%, var(--gray-0) 100%);
+  transition:
+    background 0.18s ease,
+    border-color 0.18s ease;
+
+  &:hover {
+    border-color: var(--main-200);
+    background: var(--gray-0);
+  }
+}
+
+.item-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 10px 8px 10px 12px;
+}
+
+.item-icon {
+  flex-shrink: 0;
+  font-size: 18px;
+  opacity: 0.86;
+}
+
+.item-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.item-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--gray-900);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.3;
 }
 
-.artifact-size { font-size: 11px; color: var(--gray-400); flex-shrink: 0; }
+.item-desc {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--gray-500);
+  line-height: 1.2;
+}
 
-.artifact-actions { display: flex; gap: 4px; flex-shrink: 0; }
-
-.action-btn {
+.item-actions {
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
+  gap: 2px;
+  margin-right: 8px;
+}
+
+.item-action-btn {
+  width: 30px;
+  height: 30px;
   border: none;
   background: transparent;
-  border-radius: 4px;
-  color: var(--gray-400);
+  color: var(--gray-600);
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
-  &:hover { background: var(--gray-100); color: var(--gray-600); }
+  transition: all 0.2s ease;
+}
+
+.item-action-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.item-action-btn:hover:not(:disabled) {
+  color: var(--main-700);
+  background: var(--gray-100);
+}
+
+.item-action-spin {
+  animation: artifacts-spin 1s linear infinite;
+}
+
+@keyframes artifacts-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 768px) {
+  .artifacts-list {
+    margin-top: 6px;
+  }
+
+  .artifact-card {
+    align-items: stretch;
+  }
+
+  .item-main {
+    padding: 9px 6px 9px 12px;
+  }
 }
 </style>

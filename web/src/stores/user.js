@@ -1,24 +1,36 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { authApi } from '@/apis/auth_api'
+import { useAgentStore } from './agent'
 
 export const useUserStore = defineStore('user', () => {
+  // 状态
   const token = ref(localStorage.getItem('user_token') || '')
   const userId = ref(null)
   const username = ref('')
   const uid = ref('')
+  const phoneNumber = ref('')
+  const avatar = ref('')
   const userRole = ref('')
+  const departmentId = ref(null)
+  const departmentName = ref('')
 
+  // 计算属性
   const isLoggedIn = computed(() => !!token.value)
   const isAdmin = computed(() => userRole.value === 'admin' || userRole.value === 'superadmin')
   const isSuperAdmin = computed(() => userRole.value === 'superadmin')
 
+  // 动作
   function applySession(data) {
     token.value = data.access_token
     userId.value = data.user_id
     username.value = data.username
     uid.value = data.uid
+    phoneNumber.value = data.phone_number || ''
+    avatar.value = data.avatar || ''
     userRole.value = data.role
+    departmentId.value = data.department_id || null
+    departmentName.value = data.department_name || ''
     localStorage.setItem('user_token', data.access_token)
   }
 
@@ -34,11 +46,22 @@ export const useUserStore = defineStore('user', () => {
   }
 
   function logout() {
+    // 清除状态
     token.value = ''
     userId.value = null
     username.value = ''
     uid.value = ''
+    phoneNumber.value = ''
+    avatar.value = ''
     userRole.value = ''
+    departmentId.value = null
+    departmentName.value = ''
+
+    // 清除 agentStore 状态，确保重新登录时能正确加载数据
+    const agentStore = useAgentStore()
+    agentStore.reset()
+
+    // 只清除 token
     localStorage.removeItem('user_token')
   }
 
@@ -63,45 +86,30 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
+  // 用于API请求的授权头
   function getAuthHeaders() {
-    return { Authorization: `Bearer ${token.value}` }
-  }
-
-  async function getCurrentUser() {
-    try {
-      const userData = await authApi.getCurrentUser()
-      userId.value = userData.id
-      username.value = userData.username
-      uid.value = userData.uid
-      userRole.value = userData.role
-      return userData
-    } catch (error) {
-      console.error('获取用户信息错误:', error)
-      throw error
+    return {
+      Authorization: `Bearer ${token.value}`
     }
   }
 
-  async function updateProfile(profileData) {
-    try {
-      const userData = await authApi.updateProfile(profileData)
-      if (typeof userData.username === 'string') username.value = userData.username
-      return userData
-    } catch (error) {
-      console.error('更新个人资料错误:', error)
-      throw error
-    }
-  }
-
+  // 用户管理功能
   async function getUsers({ pageSize = 100 } = {}) {
     try {
       const users = []
       let skip = 0
+
       while (true) {
         const batch = await authApi.getUsers({ skip, limit: pageSize })
         users.push(...batch)
-        if (batch.length < pageSize) break
+
+        if (batch.length < pageSize) {
+          break
+        }
+
         skip += pageSize
       }
+
       return users
     } catch (error) {
       console.error('获取用户列表错误:', error)
@@ -109,20 +117,144 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
+  async function createUser(userData) {
+    try {
+      return await authApi.createUser(userData)
+    } catch (error) {
+      console.error('创建用户错误:', error)
+      throw error
+    }
+  }
+
+  async function updateUser(userId, userData) {
+    try {
+      return await authApi.updateUser(userId, userData)
+    } catch (error) {
+      console.error('更新用户错误:', error)
+      throw error
+    }
+  }
+
+  async function deleteUser(userId) {
+    try {
+      return await authApi.deleteUser(userId)
+    } catch (error) {
+      console.error('删除用户错误:', error)
+      throw error
+    }
+  }
+
+  // 验证用户名并生成uid
+  async function validateUsernameAndGenerateUid(username) {
+    try {
+      return await authApi.validateUsername(username)
+    } catch (error) {
+      console.error('用户名验证错误:', error)
+      throw error
+    }
+  }
+
+  // 上传头像
+  async function uploadAvatar(file) {
+    try {
+      const data = await authApi.uploadAvatar(file)
+
+      // 更新本地头像状态
+      avatar.value = data.avatar_url
+
+      return data
+    } catch (error) {
+      console.error('头像上传错误:', error)
+      throw error
+    }
+  }
+
+  // 获取当前用户信息
+  async function getCurrentUser() {
+    try {
+      const userData = await authApi.getCurrentUser()
+
+      // 更新本地状态
+      userId.value = userData.id
+      username.value = userData.username
+      uid.value = userData.uid
+      phoneNumber.value = userData.phone_number || ''
+      avatar.value = userData.avatar || ''
+      userRole.value = userData.role
+      departmentId.value = userData.department_id || null
+      departmentName.value = userData.department_name || ''
+
+      return userData
+    } catch (error) {
+      console.error('获取用户信息错误:', error)
+      throw error
+    }
+  }
+
+  // 更新个人资料
+  async function updateProfile(profileData) {
+    try {
+      const userData = await authApi.updateProfile(profileData)
+
+      // 更新本地状态
+      if (typeof userData.username === 'string') {
+        username.value = userData.username
+      }
+      if (typeof userData.phone_number !== 'undefined') {
+        phoneNumber.value = userData.phone_number || ''
+      }
+
+      return userData
+    } catch (error) {
+      console.error('更新个人资料错误:', error)
+      throw error
+    }
+  }
+
   return {
-    token, userId, username, uid, userRole,
-    isLoggedIn, isAdmin, isSuperAdmin,
-    login, logout, initialize, checkFirstRun,
-    getAuthHeaders, getCurrentUser, updateProfile, getUsers
+    // 状态
+    token,
+    userId,
+    username,
+    uid,
+    phoneNumber,
+    avatar,
+    userRole,
+    departmentId,
+    departmentName,
+
+    // 计算属性
+    isLoggedIn,
+    isAdmin,
+    isSuperAdmin,
+
+    // 方法
+    login,
+    logout,
+    initialize,
+    checkFirstRun,
+    getAuthHeaders,
+    getUsers,
+    createUser,
+    updateUser,
+    deleteUser,
+    validateUsernameAndGenerateUid,
+    uploadAvatar,
+    getCurrentUser,
+    updateProfile
   }
 })
 
+// 检查当前用户是否有管理员权限
 export const checkAdminPermission = () => {
   const userStore = useUserStore()
-  if (!userStore.isAdmin) throw new Error('需要管理员权限')
+  if (!userStore.isAdmin) {
+    throw new Error('需要管理员权限')
+  }
   return true
 }
 
+// 检查当前用户是否有超级管理员权限
 export const checkSuperAdminPermission = () => {
   const userStore = useUserStore()
   return userStore.isSuperAdmin

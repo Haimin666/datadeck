@@ -1,12 +1,9 @@
 <template>
-  <div class="blank-layout">
-    <router-view />
+  <div>
+    <router-view v-slot="{ Component }">
+      <keep-alive>
+        <component :is="Component" />
+      </keep-alive>
+    </router-view>
   </div>
 </template>
-
-<style scoped>
-.blank-layout {
-  height: 100vh;
-  overflow: hidden;
-}
-</style>

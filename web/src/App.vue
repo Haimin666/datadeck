@@ -1,12 +1,12 @@
 <script setup>
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
-import { useUserStore } from '@/stores/user'
 import { useAgentStore } from '@/stores/agent'
+import { useUserStore } from '@/stores/user'
 import { useThemeStore } from '@/stores/theme'
 import { onMounted } from 'vue'
 
-const userStore = useUserStore()
 const agentStore = useAgentStore()
+const userStore = useUserStore()
 const themeStore = useThemeStore()
 
 onMounted(async () => {

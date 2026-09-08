@@ -1,12 +1,6 @@
-/**
- * 自动滚动到消息底部
- */
-export function scrollToBottom(element, behavior = 'smooth') {
-  if (!element) return
-  element.scrollTo({ top: element.scrollHeight, behavior })
-}
-
-export function forceScrollToBottom(element) {
-  if (!element) return
-  element.scrollTop = element.scrollHeight
+/** 判断滚动容器是否位于底部附近，容忍浏览器亚像素误差。 */
+export function isLogContainerAtBottom(container, threshold = 4) {
+  if (!container) return true
+  const distance = container.scrollHeight - container.clientHeight - container.scrollTop
+  return distance <= threshold
 }
