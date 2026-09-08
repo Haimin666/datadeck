@@ -1,0 +1,1 @@
+# datadeck: adapter interface ports. 平台依赖全部经这些接口注入，本库不依赖任何上游平台。
