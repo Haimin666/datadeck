@@ -67,12 +67,16 @@ async def create_thread(
 async def list_threads(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    agent_id: str = Query("", description="按 agent 过滤（空=全部）"),
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
+    conds = [Thread.uid == current_user.uid]
+    if agent_id:
+        conds.append(Thread.agent_id == agent_id)
     r = await db.execute(
         sa_select(Thread)
-        .where(Thread.uid == current_user.uid)
+        .where(*conds)
         .order_by(Thread.is_pinned.desc(), Thread.updated_at.desc())
         .limit(limit)
         .offset(offset)
@@ -116,6 +120,11 @@ async def update_thread(
         t.title = body["title"]
     if "is_pinned" in body:
         t.is_pinned = body["is_pinned"]
+    if body.get("tool_approval_mode") is not None:
+        mode = str(body["tool_approval_mode"])
+        if mode not in ("default", "always_trust", "none"):
+            raise HTTPException(status_code=422, detail="tool_approval_mode 取值须为 default/always_trust/none")
+        t.tool_approval_mode = mode
     await db.commit()
     await db.refresh(t)
     return {"thread": t.to_dict()}
@@ -235,24 +244,38 @@ async def get_thread_state(
     return {"thread_id": thread_id, "agent_state": agent_state, "token_usage": token_usage}
 
 
-@chat.get("/thread/{thread_id}/active-run")
-async def get_active_run(
-    thread_id: str,
-    current_user: User = Depends(get_required_user),
-    db: AsyncSession = Depends(get_db),
-):
+async def _get_active_run(thread_id: str, uid: str, db: AsyncSession):
     r = await db.execute(
         sa_text(
             "SELECT id, status, agent_slug, created_at FROM agent_runs "
             "WHERE thread_id=:tid AND uid=:uid AND status NOT IN ('completed','failed','cancelled','interrupted') "
             "ORDER BY created_at DESC LIMIT 1"
         ),
-        {"tid": thread_id, "uid": current_user.uid},
+        {"tid": thread_id, "uid": uid},
     )
     row = r.fetchone()
     if row:
         return {"run": {"id": row[0], "status": row[1], "agent_slug": row[2], "created_at": str(row[3])}}
     return {"run": None}
+
+
+@chat.get("/thread/{thread_id}/active-run")
+async def get_active_run(
+    thread_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _get_active_run(thread_id, current_user.uid, db)
+
+
+@chat.get("/thread/{thread_id}/active_run")
+async def get_active_run_alias(
+    thread_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """前端 active_run 命名兼容别名。"""
+    return await _get_active_run(thread_id, current_user.uid, db)
 
 
 class FeedbackRequest(BaseModel):

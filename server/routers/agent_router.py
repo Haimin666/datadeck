@@ -15,6 +15,11 @@ from datadeck.ports.checkpointer import CheckpointerProvider
 agent = APIRouter(prefix="/agent", tags=["agent"])
 
 
+def _require_admin(user: User) -> None:
+    if user.role not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+
+
 class AgentCreate(BaseModel):
     name: str
     backend_id: str = "ChatbotAgent"
@@ -90,18 +95,23 @@ async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @agent.post("")
-async def create_agent(body: AgentCreate, db: AsyncSession = Depends(get_db)):
-    slug = body.slug or body.name
+async def create_agent(
+    payload: AgentCreate,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _require_admin(current_user)
+    slug = payload.slug or payload.name
     existing = await db.execute(select(Agent).where(Agent.slug == slug))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="slug 已存在")
     a = Agent(
         id=str(hash(slug) % (2**63)),
         slug=slug,
-        name=body.name,
-        description=body.description,
-        backend_id=body.backend_id,
-        config_json=body.config_json or {},
+        name=payload.name,
+        description=payload.description,
+        backend_id=payload.backend_id,
+        config_json=payload.config_json or {},
     )
     db.add(a)
     await db.commit()
@@ -110,24 +120,35 @@ async def create_agent(body: AgentCreate, db: AsyncSession = Depends(get_db)):
 
 
 @agent.put("/{agent_id}")
-async def update_agent(agent_id: str, body: AgentUpdate, db: AsyncSession = Depends(get_db)):
+async def update_agent(
+    agent_id: str,
+    payload: AgentUpdate,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _require_admin(current_user)
     result = await db.execute(select(Agent).where(Agent.id == agent_id))
     a = result.scalar_one_or_none()
     if not a:
         raise HTTPException(status_code=404, detail="智能体不存在")
-    if body.name:
-        a.name = body.name
-    if body.description is not None:
-        a.description = body.description
-    if body.config_json is not None:
-        a.config_json = body.config_json
+    if payload.name:
+        a.name = payload.name
+    if payload.description is not None:
+        a.description = payload.description
+    if payload.config_json is not None:
+        a.config_json = payload.config_json
     await db.commit()
     await db.refresh(a)
     return {"agent": a.to_dict()}
 
 
 @agent.delete("/{agent_id}")
-async def delete_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_agent(
+    agent_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _require_admin(current_user)
     result = await db.execute(select(Agent).where(Agent.id == agent_id, Agent.is_builtin == False))
     a = result.scalar_one_or_none()
     if not a:

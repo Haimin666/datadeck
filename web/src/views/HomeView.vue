@@ -136,7 +136,7 @@
         <span class="hero-vignette" aria-hidden="true"></span>
         <div class="hero-content">
           <p class="hero-eyebrow reveal-up">
-            <span class="eyebrow-dot"></span>开源 · 知识库 × 智能体 Harness
+            <span class="eyebrow-dot"></span>狮桥 · 知识库 × 智能体 Harness
           </p>
           <h1 class="title reveal-up delay-1">{{ infoStore.branding.title }}</h1>
           <div class="subtitle-wrap reveal-up delay-1">

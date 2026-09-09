@@ -28,6 +28,7 @@ class User(Base):
     password_hash = Column(String(256), nullable=False)
     role = Column(String(32), nullable=False, default="user")  # user / admin / superadmin
     domain = Column(String(64), nullable=False, default="default", server_default="default")  # 业务域隔离
+    avatar = Column(String(512), nullable=True)  # 头像 URL（上传后回填）
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     last_login = Column(DateTime(timezone=True), nullable=True)
     is_deleted = Column(Integer, nullable=False, default=0)
@@ -38,6 +39,8 @@ class User(Base):
             "username": self.username,
             "uid": self.uid,
             "role": self.role,
+            "avatar": self.avatar or "",
+            "domain": self.domain or "default",
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "last_login": self.last_login.isoformat() if self.last_login else None,
         }
@@ -56,6 +59,8 @@ class Thread(Base):
     agent_id = Column(String(128), nullable=False)
     title = Column(String(256), nullable=False, default="新的对话")
     is_pinned = Column(Boolean, nullable=False, default=False)
+    tool_approval_mode = Column(String(32), nullable=False, default="default",
+                                server_default="default")  # default/always_trust/none
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
     viewed_at = Column(DateTime(timezone=True), nullable=True)
@@ -67,6 +72,7 @@ class Thread(Base):
             "agent_id": self.agent_id,
             "title": self.title,
             "is_pinned": self.is_pinned,
+            "tool_approval_mode": self.tool_approval_mode or "default",
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "viewed_at": self.viewed_at.isoformat() if self.viewed_at else None,

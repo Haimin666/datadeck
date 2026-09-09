@@ -26,6 +26,7 @@ from server.utils.datetime_utils import utc_now  # noqa: E402
 from server.services.eval_service import EvaluationCase, EvaluationRun  # noqa: F401,E402
 from server.services.pg_memory_store import AgentMemory  # noqa: F401,E402
 from server.services.metric_registry import MetricRegistry  # noqa: F401,E402
+from server.routers.config_router import SystemConfig, UserConfig  # noqa: F401,E402
 
 
 @asynccontextmanager
@@ -96,6 +97,11 @@ frontend_dist = os.path.join(os.path.dirname(__file__), "..", "web", "dist")
 if os.path.isdir(frontend_dist):
     app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
     app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+
+# 用户上传文件（头像/图片）静态服务
+uploads_dir = os.path.join(os.path.dirname(__file__), "..", "uploads")
+if os.path.isdir(uploads_dir):
+    app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
 
 
 @app.get("/")

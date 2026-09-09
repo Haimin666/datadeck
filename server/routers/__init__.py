@@ -7,6 +7,7 @@ from server.routers.dashboard_router import dashboard
 from server.routers.system_router import system
 from server.routers.rag_router import rag
 from server.routers.eval_router import eval_router
+from server.routers.config_router import config_router
 
 router = APIRouter()
 router.include_router(system)
@@ -17,3 +18,4 @@ router.include_router(apikey)
 router.include_router(dashboard)
 router.include_router(rag)
 router.include_router(eval_router)
+router.include_router(config_router)
