@@ -27,6 +27,7 @@ from server.services.eval_service import EvaluationCase, EvaluationRun  # noqa: 
 from server.services.pg_memory_store import AgentMemory  # noqa: F401,E402
 from server.services.metric_registry import MetricRegistry  # noqa: F401,E402
 from server.routers.config_router import SystemConfig, UserConfig  # noqa: F401,E402
+from server.services.attachment_service import ThreadAttachment  # noqa: F401,E402
 
 
 @asynccontextmanager
@@ -92,11 +93,18 @@ app.add_middleware(
 app.include_router(router, prefix="/api")
 app.include_router(run_router, prefix="/api")
 
-# 前端静态文件
+# 前端静态文件（SPA：非 /api、/uploads 的未匹配路径回退 index.html）
 frontend_dist = os.path.join(os.path.dirname(__file__), "..", "web", "dist")
 if os.path.isdir(frontend_dist):
     app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
-    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+
+    @app.exception_handler(404)
+    async def spa_fallback(request, exc):  # noqa: ANN001
+        from fastapi.responses import JSONResponse
+
+        if request.url.path.startswith(("/api", "/uploads")):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
 
 # 用户上传文件（头像/图片）静态服务
 uploads_dir = os.path.join(os.path.dirname(__file__), "..", "uploads")
