@@ -23,8 +23,8 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./uploads:/app/uploads
-      - ./server/uploads:/app/server/uploads
+      - ./uploads:/app/uploads:Z
+      - ./server/uploads:/app/server/uploads:Z
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/system/health', timeout=3)\""]
       interval: 10s
@@ -43,7 +43,7 @@ services:
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - datadeck-postgres:/var/lib/postgresql/data
+      - datadeck-postgres:/var/lib/postgresql/data:Z
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U datadeck -d datadeck"]
       interval: 5s
