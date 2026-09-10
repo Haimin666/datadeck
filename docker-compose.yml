@@ -43,7 +43,7 @@ services:
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - datadeck-postgres:/var/lib/postgresql/data:Z
+      - ./data/postgres:/var/lib/postgresql/data:Z
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U datadeck -d datadeck"]
       interval: 5s
@@ -77,6 +77,5 @@ services:
       retries: 12
 
 volumes:
-  datadeck-postgres:
   datadeck-qdrant:
   datadeck-redis:
