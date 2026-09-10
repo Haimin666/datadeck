@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 FROM docker.m.daocloud.io/library/node:22.13-alpine AS frontend-builder
 
 WORKDIR /app/web
