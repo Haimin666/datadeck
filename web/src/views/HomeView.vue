@@ -11,7 +11,6 @@
       <a-result status="error" :title="error.title" :sub-title="error.message">
         <template #extra>
           <a-button type="primary" @click="retryLoad">重试</a-button>
-          <a-button :href="docsUrl" target="_blank" rel="noopener noreferrer">常见问题</a-button>
         </template>
       </a-result>
     </div>
@@ -107,7 +106,7 @@
       <header class="site-header">
         <div class="logo">
           <img
-            :src="infoStore.organization.logo"
+            src="/logo.png"
             :alt="infoStore.organization.name"
             class="logo-img"
           />
@@ -146,21 +145,7 @@
               </p>
             </Transition>
           </div>
-          <div class="hero-actions reveal-up delay-2">
-            <button class="button-base primary" @click="goToChat">
-              <span>开始体验</span>
-              <ArrowRight :size="18" />
-            </button>
-            <a
-              class="button-base secondary"
-              :href="docsUrl"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <BookText :size="18" />
-              <span>查看文档</span>
-            </a>
-          </div>
+          <LoginView v-if="!userStore.isLoggedIn" embedded class="home-login-form reveal-up delay-2" />
         </div>
       </main>
 
@@ -177,17 +162,14 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { useInfoStore } from '@/stores/info'
 import { healthApi } from '@/apis/system_api'
 import UserInfoComponent from '@/components/UserInfoComponent.vue'
-import { ArrowRight, BookText } from '@lucide/vue'
+import LoginView from '@/views/LoginView.vue'
 
-const router = useRouter()
 const userStore = useUserStore()
 const infoStore = useInfoStore()
-const docsUrl = 'https://github.com/Haimin666/datadeck/'
 
 // 加载状态
 const isLoading = ref(true)
@@ -267,16 +249,6 @@ const loadData = async () => {
 
 const retryLoad = () => {
   loadData()
-}
-
-const goToChat = async () => {
-  if (!userStore.isLoggedIn) {
-    sessionStorage.setItem('redirect', '/')
-    router.push('/login')
-    return
-  }
-
-  router.push('/agent')
 }
 
 onMounted(() => {
@@ -535,6 +507,10 @@ onUnmounted(() => {
   gap: 1.6rem;
   max-width: 1200px;
   margin: 0 auto;
+}
+
+.home-login-form {
+  margin-top: 0.45rem;
 }
 
 .reveal-up {

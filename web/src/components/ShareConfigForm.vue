@@ -170,7 +170,6 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { Building2, Globe, Users, UserPlus } from '@lucide/vue'
 import { useUserStore } from '@/stores/user'
 import { authApi } from '@/apis/auth_api'
-import { departmentApi } from '@/apis/department_api'
 
 const userStore = useUserStore()
 const departments = ref([])
@@ -193,7 +192,7 @@ const props = defineProps({
   requireReadScope: { type: Boolean, default: false },
   allowedAccessLevels: {
     type: Array,
-    default: () => ['global', 'department', 'user']
+    default: () => ['global', 'user']
   }
 })
 
@@ -400,14 +399,6 @@ const toggleSelection = (scopeKey, accessLevel, value, checked) => {
   }
 }
 
-const loadDepartments = async () => {
-  try {
-    const result = await departmentApi.getDepartments()
-    departments.value = result.departments || result || []
-  } catch (error) {
-    console.error('加载部门列表失败:', error)
-  }
-}
 const loadUsers = async () => {
   try {
     users.value = await authApi.getUserAccessOptions()
@@ -454,7 +445,6 @@ const hasManageScopeViolation = computed(() =>
 
 onMounted(() => {
   initConfig()
-  loadDepartments()
   loadUsers()
 })
 

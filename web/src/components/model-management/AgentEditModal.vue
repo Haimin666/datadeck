@@ -140,7 +140,7 @@ const captureProfileBaseline = () => {
 const hasAnyUnsavedChanges = computed(() => agentStore.hasConfigChanges || hasProfileChanges.value)
 
 const normalizeAgent = (agent) => {
-  const agentId = agent?.agent_id || agent?.slug || agent?.id
+  const agentId = agent?.id || agent?.agent_id || agent?.slug
   return agentId
     ? { ...agent, id: agentId, agent_id: agentId, slug: agent?.slug || agentId }
     : agent
@@ -191,7 +191,7 @@ const isEditingBuiltinAgent = computed(() => isBuiltinAgent({ id: editingAgentId
 const canEditAgentShareConfig = computed(() => !isEditingBuiltinAgent.value)
 const getAgentShareAllowedLevels = () => {
   if (isEditingBuiltinAgent.value) return ['global']
-  if (userStore.isAdmin) return ['global', 'department', 'user']
+  if (userStore.isAdmin) return ['global', 'user']
   return ['user']
 }
 

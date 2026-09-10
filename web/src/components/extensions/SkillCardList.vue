@@ -87,57 +87,49 @@
             :key="`${group.key}:${skill.slug || skill.id}`"
             class="card-wrapper"
             :class="{
-              selected: !skill.isSuite && selectedCardSlugs.includes(skill.slug),
-              'batch-mode': isBatchDeleteMode && !skill.isSuite
+              selected: selectedCardSlugs.includes(skill.slug),
+              'batch-mode': isBatchDeleteMode
             }"
           >
-            <SkillSuiteCard
-              v-if="skill.isSuite"
-              :suite="skill"
-              :installed-slugs="[...installedPersonalSkillKeys]"
-              @open="openRecommendedSuite"
+            <a-checkbox
+              v-if="
+                isBatchDeleteMode &&
+                canManageSkill(skill) &&
+                skill.sourceType !== 'builtin' &&
+                skill.sourceScope !== 'personal'
+              "
+              :checked="selectedCardSlugs.includes(skill.slug)"
+              @change="handleToggleCardSelect(skill.slug)"
+              class="card-select-checkbox"
             />
-            <template v-else>
-              <a-checkbox
-                v-if="
-                  isBatchDeleteMode &&
-                  canManageSkill(skill) &&
-                  skill.sourceType !== 'builtin' &&
-                  skill.sourceScope !== 'personal'
-                "
-                :checked="selectedCardSlugs.includes(skill.slug)"
-                @change="handleToggleCardSelect(skill.slug)"
-                class="card-select-checkbox"
-              />
-              <InfoCard
-                variant="default"
-                :title="formatExtensionCardTitle(skill.name)"
-                :subtitle="skill.slug"
-                :description="skill.description || '暂无描述'"
-                :tags="skillCardTags(skill)"
-                :default-icon="getSkillIcon(skill.slug)"
-                @click="handleCardClick(skill)"
-                :class="{ 'card-clickable-select': isBatchDeleteMode }"
+            <InfoCard
+              variant="default"
+              :title="formatExtensionCardTitle(skill.name)"
+              :subtitle="skill.slug"
+              :description="skill.description || '暂无描述'"
+              :tags="skillCardTags(skill)"
+              :default-icon="getSkillIcon(skill.slug)"
+              @click="handleCardClick(skill)"
+              :class="{ 'card-clickable-select': isBatchDeleteMode }"
+            >
+              <template #actions>
+                <button
+                  v-if="skill.sourceScope !== 'personal'"
+                  type="button"
+                  class="skill-enabled-action"
+                  :class="{ enabled: skill.enabled !== false }"
+                  :disabled="!canManageSkill(skill) || isSkillToggling(skill.slug)"
+                  :aria-label="skill.enabled === false ? '启用 Skill' : '禁用 Skill'"
+                @click.stop="handleToggleSkillEnabled(skill)"
               >
-                <template #actions>
-                  <button
-                    v-if="skill.sourceScope !== 'personal'"
-                    type="button"
-                    class="skill-enabled-action"
-                    :class="{ enabled: skill.enabled !== false }"
-                    :disabled="!canManageSkill(skill) || isSkillToggling(skill.slug)"
-                    :aria-label="skill.enabled === false ? '启用 Skill' : '禁用 Skill'"
-                    @click.stop="handleToggleSkillEnabled(skill)"
-                  >
-                    <Plus v-if="skill.enabled === false" :size="15" class="action-icon" />
-                    <template v-else>
-                      <Check :size="15" class="action-icon action-icon-check" />
-                      <Minus :size="15" class="action-icon action-icon-minus" />
-                    </template>
-                  </button>
+                <Plus v-if="skill.enabled === false" :size="15" class="action-icon" />
+                <template v-else>
+                  <Check :size="15" class="action-icon action-icon-check" />
+                  <Minus :size="15" class="action-icon action-icon-minus" />
                 </template>
-              </InfoCard>
-            </template>
+              </button>
+              </template>
+            </InfoCard>
           </div>
         </ExtensionCardGrid>
       </template>
@@ -516,75 +508,12 @@ import {
 import { skillApi } from '@/apis/skill_api'
 import ExtensionCardGrid from './ExtensionCardGrid.vue'
 import SkillInstallFlowModal from './SkillInstallFlowModal.vue'
-import SkillSuiteCard from './SkillSuiteCard.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
 import PageShoulder from '@/components/shared/PageShoulder.vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import { formatExtensionCardTitle } from '@/utils/extensionDisplayName'
 import { getShareConfigLabel } from '@/utils/shareConfig'
 import { getSkillIcon } from '@/utils/skill_icon_utils'
-
-const RECOMMENDED_SUITES = [
-  {
-    id: 'minimax-office-skills',
-    name: 'MiniMax 办公文档套件',
-    provider: 'MiniMax-AI',
-    description:
-      'MiniMax 开源的办公文档 Skills 合集，覆盖 DOCX、PDF、XLSX 与 PPTX 演示文稿的创建与格式化。',
-    source: 'https://modelscope.cn/collections/MiniMax/MiniMax-Office-skills',
-    skills: [
-      {
-        slug: 'pptx-generator',
-        name: 'pptx-generator',
-        description:
-          '生成、编辑和阅读 PowerPoint 演示文稿。使用 PptxGenJS 从头开始创建，通过 XML 工作流编辑现有的 PPTX，或使用 markitdown 提取文本。'
-      },
-      {
-        slug: 'minimax-docx',
-        name: 'minimax-docx',
-        description:
-          '使用 OpenXML SDK（.NET）进行专业的 DOCX 文档创建、编辑和格式化，支持模板应用与 XSD 验证门控检查。'
-      },
-      {
-        slug: 'minimax-xlsx',
-        name: 'minimax-xlsx',
-        description:
-          '创建、读取、分析、编辑或验证 Excel/电子表格文件，支持公式重算校验与专业财务格式标准。'
-      },
-      {
-        slug: 'minimax-pdf',
-        name: 'minimax-pdf',
-        description: '高视觉质量与设计感的 PDF 生成、表单字段填写、样式转换与专业打印级文档排版。'
-      }
-    ]
-  },
-  {
-    id: 'skill-builder-suite',
-    name: 'Skill 能力与进化套件',
-    provider: 'Community',
-    description: '用于 Agent 技能发现、创建、评测调优与自主进化的核心工具合集。',
-    skills: [
-      {
-        slug: 'skill-creator',
-        name: 'skill-creator',
-        source: 'https://modelscope.cn/skills/@anthropics/skill-creator',
-        description: '创建新技能、修改与优化现有技能，并通过方差基准分析评测技能表现与调优描述。'
-      },
-      {
-        slug: 'find-skills',
-        name: 'find-skills',
-        source: 'https://modelscope.cn/skills/@vercel-labs/find-skills',
-        description: '协助智能体根据用户需求检索并发现可安装的开源 Agent Skills，动态扩展自身能力。'
-      },
-      {
-        slug: 'self-improving-agent',
-        name: 'self-improving-agent',
-        source: 'https://github.com/zhaono1/agent-playbook',
-        description: '通用自我进化技能，基于多重记忆架构从经验与错误中持续学习并自我迭代。'
-      }
-    ]
-  }
-]
 
 const router = useRouter()
 
@@ -661,29 +590,8 @@ const installedSkillCards = computed(() =>
   }))
 )
 
-const installedPersonalSkillKeys = computed(() => {
-  const keys = new Set()
-  installedSkillCards.value.forEach((skill) => {
-    if (skill.sourceScope !== 'personal') return
-    const identifiers = [skill.slug, skill.name]
-    identifiers.forEach((value) => {
-      if (value) keys.add(String(value).toLowerCase())
-    })
-  })
-  return keys
-})
-
-const recommendedSuiteCards = computed(() =>
-  RECOMMENDED_SUITES.map((suite) => ({ ...suite, isSuite: true }))
-)
-
 const filteredInstalledSkills = computed(() => installedSkillCards.value.filter(matchesSearch))
 const skillGroups = computed(() => [
-  {
-    key: 'recommended',
-    title: '推荐',
-    skills: isBatchDeleteMode.value ? [] : recommendedSuiteCards.value.filter(matchesSearch)
-  },
   {
     key: 'personal',
     title: '个人技能',
@@ -1059,14 +967,6 @@ const closeInstallFlow = () => {
   installFlowOpen.value = false
   installFlow.value = null
   if (wasRemoteFlow) resetRemoteSelection()
-}
-
-const openRecommendedSuite = (suite) => {
-  openInstallFlow({
-    kind: 'suite',
-    suite,
-    installedSlugs: [...installedPersonalSkillKeys.value]
-  })
 }
 
 const handleInstallFlowCompleted = async ({ success, failed }) => {

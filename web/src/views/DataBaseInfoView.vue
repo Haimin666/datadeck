@@ -399,6 +399,7 @@
                   <ShareConfigForm
                     ref="shareConfigFormRef"
                     v-model="editShareConfig"
+                    :allowed-access-levels="['global', 'user']"
                     :auto-select-user-dept="true"
                     :require-read-scope="true"
                   />
@@ -462,7 +463,6 @@ import SearchConfigPanel from '@/components/SearchConfigPanel.vue'
 import AiTextarea from '@/components/AiTextarea.vue'
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
 import { databaseApi } from '@/apis/knowledge_api'
-import { departmentApi } from '@/apis/department_api'
 import { authApi } from '@/apis/auth_api'
 import { useChunkPresetOptions } from '@/composables/useChunkPresetOptions'
 import { DEFAULT_CHUNK_PRESET_ID } from '@/utils/chunkUtils'
@@ -811,7 +811,7 @@ watch(
           showEditModal()
           return
         }
-        await router.replace({ path: '/extensions', query: { tab: 'knowledge' } })
+        await router.replace({ path: '/knowledge' })
         return
       }
       await detectVirtualFolders()
@@ -868,7 +868,7 @@ watch(
 )
 
 const backToDatabase = () => {
-  router.push({ path: '/extensions', query: { tab: 'knowledge' } })
+  router.push({ path: '/knowledge' })
 }
 
 const copyDatabaseId = async () => {
@@ -891,7 +891,6 @@ const copyDatabaseId = async () => {
   }
 }
 
-const departments = ref([])
 const users = ref([])
 const editModalVisible = ref(false)
 const editModalTab = ref('basic')
@@ -956,22 +955,12 @@ const shareConfigDisplay = computed(() => {
 })
 
 const getDepartmentName = (id) => {
-  const dept = departments.value.find((item) => Number(item.id) === Number(id))
-  return dept?.name || `部门${id}`
+  return `部门${id}`
 }
 
 const getUserName = (uid) => {
   const user = users.value.find((item) => item.uid === uid)
   return user?.username || uid
-}
-
-const loadDepartments = async () => {
-  try {
-    const res = await departmentApi.getDepartments()
-    departments.value = res.departments || res || []
-  } catch {
-    departments.value = []
-  }
 }
 
 const loadUsers = async () => {
@@ -1095,7 +1084,6 @@ const handleEditSubmit = async () => {
 
 onMounted(() => {
   loadChunkPresetOptions()
-  loadDepartments()
   loadUsers()
   document.addEventListener('click', onUploadMenuOutsideClick)
 })

@@ -86,7 +86,7 @@
                       @click="openAgentManagement"
                     >
                       <Settings2 :size="15" class="config-dropdown-item-icon" />
-                      <span class="config-dropdown-item-label">编辑智能体</span>
+                      <span class="config-dropdown-item-label">管理智能体</span>
                     </button>
                     <button
                       type="button"
@@ -104,11 +104,6 @@
         </AgentChatComponent>
       </div>
     </div>
-    <AgentEditModal
-      ref="agentEditModalRef"
-      :backend-options="agentBackendOptions"
-      @saved="handleAgentSaved"
-    />
   </div>
 </template>
 
@@ -117,10 +112,8 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { Settings2, ChevronDown, Check, Plus } from '@lucide/vue'
 import { useRoute, useRouter } from 'vue-router'
-import { agentApi } from '@/apis/agent_api'
 import { useOutsidePointerdown } from '@/composables/useOutsidePointerdown'
 import AgentChatComponent from '@/components/AgentChatComponent.vue'
-import AgentEditModal from '@/components/model-management/AgentEditModal.vue'
 import { isBuiltinAgent, useAgentStore } from '@/stores/agent'
 import { handleChatError } from '@/utils/errorHandler'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
@@ -130,7 +123,6 @@ import { storeToRefs } from 'pinia'
 
 // 组件引用
 const chatComponentRef = ref(null)
-const agentEditModalRef = ref(null)
 
 // Stores
 const agentStore = useAgentStore()
@@ -255,19 +247,6 @@ const currentAgentLabel = computed(() => {
 const agentDropdownOpen = ref(false)
 const agentDropdownTriggerRef = ref(null)
 const agentDropdownPanelRef = ref(null)
-const agentBackendOptions = ref([])
-const agentBackendsLoaded = ref(false)
-
-const loadAgentBackends = async () => {
-  if (agentBackendsLoaded.value) return
-  const response = await agentApi.getAgentBackends()
-  agentBackendOptions.value = (response.backends || []).map((backend) => ({
-    label: backend.name || backend.backend_id,
-    value: backend.backend_id
-  }))
-  agentBackendsLoaded.value = true
-}
-
 const handleAgentSwitch = async (agentId, hasActiveThread, isCreatingThread) => {
   if (!agentId || agentId === selectedAgentId.value) return
   if (isCreatingThread) {
@@ -287,39 +266,14 @@ const handleAgentSwitch = async (agentId, hasActiveThread, isCreatingThread) => 
   }
 }
 
-const handleAgentSaved = async ({ mode, agent } = {}) => {
-  if (mode === 'create' && !agent?.is_subagent) {
-    await chatComponentRef.value?.selectThreadFromRoute?.('')
-  }
-
-  await agentStore.fetchAgents()
-  if (selectedAgentId.value) {
-    await agentStore.fetchAgentDetail(selectedAgentId.value, true)
-  }
-}
-
 const openCreateAgent = async () => {
   agentDropdownOpen.value = false
-  try {
-    await loadAgentBackends()
-    agentEditModalRef.value?.openCreate()
-  } catch (error) {
-    message.error(error.message || '打开新建智能体弹窗失败')
-  }
+  await router.push({ name: 'AgentManageComp' })
 }
 
 const openAgentManagement = async () => {
   agentDropdownOpen.value = false
-  if (!selectedAgentId.value) {
-    message.warning('请先选择智能体')
-    return
-  }
-  try {
-    await loadAgentBackends()
-    await agentEditModalRef.value?.openEdit(selectedAgentId.value)
-  } catch (error) {
-    message.error(error.message || '打开智能体配置失败')
-  }
+  await router.push({ name: 'AgentManageComp' })
 }
 
 useOutsidePointerdown(agentDropdownOpen, [agentDropdownTriggerRef, agentDropdownPanelRef])

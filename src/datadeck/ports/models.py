@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -51,11 +53,18 @@ def load_chat_model(spec: ChatModelSpec, provider: ModelProvider, **kwargs) -> B
             **kwargs,
         )
     # 默认 openai 兼容
-    return ChatOpenAI(
-        model=spec.model,
-        api_key=SecretStr(spec.api_key),
-        base_url=spec.base_url or None,
-        temperature=spec.temperature,
-        stream_usage=True,
-        **kwargs,
-    )
+    model_kwargs = {
+        "model": spec.model,
+        "api_key": SecretStr(spec.api_key),
+        "base_url": spec.base_url or None,
+        "temperature": spec.temperature,
+        "stream_usage": True,
+    }
+    model_kwargs.update(kwargs)
+    proxy = os.getenv("DATADECK_MODEL_HTTP_PROXY")
+    if proxy and spec.base_url:
+        import httpx
+
+        model_kwargs["http_client"] = httpx.Client(proxy=proxy, trust_env=False)
+        model_kwargs["http_async_client"] = httpx.AsyncClient(proxy=proxy, trust_env=False)
+    return ChatOpenAI(**model_kwargs)

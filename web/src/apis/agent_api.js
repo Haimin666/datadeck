@@ -119,6 +119,8 @@ export const agentApi = {
       model_spec: data.model_spec || null,
       tool_approval_mode: data.tool_approval_mode ?? null,
       resume: data.resume ?? null,
+      resume_payload: data.resume_payload ?? null,
+      tool_approval: data.tool_approval ?? null,
       created_by_run_id: data.created_by_run_id || null,
       queue_policy: data.queue_policy || 'enqueue'
     }),

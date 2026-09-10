@@ -14,44 +14,6 @@
           {{ activeTab === 'overview' ? '系统运行与资源使用' : '会话趋势与历史审计' }}
         </span>
       </template>
-      <template #actions>
-        <div class="dashboard-header-actions">
-          <a-tooltip title="系统设置">
-            <button
-              type="button"
-              class="header-action-button"
-              aria-label="系统设置"
-              @click="openSettings"
-            >
-              <Settings class="header-action-icon" />
-            </button>
-          </a-tooltip>
-          <a-tooltip :title="themeStore.isDark ? '切换到浅色模式' : '切换到深色模式'">
-            <button
-              type="button"
-              class="header-action-button"
-              aria-label="切换主题"
-              @click="toggleTheme"
-            >
-              <Sun v-if="themeStore.isDark" class="header-action-icon" />
-              <Moon v-else class="header-action-icon" />
-            </button>
-          </a-tooltip>
-          <a-tooltip title="任务中心">
-            <button
-              type="button"
-              class="header-action-button task-center-button"
-              :class="{ active: taskerStore.isDrawerOpen }"
-              aria-label="任务中心"
-              @click="openTaskCenter"
-            >
-              <ClipboardList class="header-action-icon" />
-              <span class="task-center-label">任务中心</span>
-              <a-badge :count="activeTaskCount" :overflow-count="99" size="small" />
-            </button>
-          </a-tooltip>
-        </div>
-      </template>
     </PageHeader>
 
     <StatsOverviewComponent
@@ -119,16 +81,12 @@
 </template>
 
 <script setup>
-import { computed, inject, ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { message } from 'ant-design-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { dashboardApi } from '@/apis/dashboard_api'
 import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
-import { useTaskerStore } from '@/stores/tasker'
-import { useThemeStore } from '@/stores/theme'
-import { useUserStore } from '@/stores/user'
-import { ClipboardList, Settings, Sun, Moon } from '@lucide/vue'
 
 // 导入子组件
 import PageHeader from '@/components/shared/PageHeader.vue'
@@ -155,13 +113,7 @@ const threadActivated = ref(activeTab.value === 'threads')
 // 组件引用
 const feedbackModal = ref(null)
 const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
-const taskerStore = useTaskerStore()
-const themeStore = useThemeStore()
-const userStore = useUserStore()
 const { knowledgeEnabled } = storeToRefs(runtimeCapabilitiesStore)
-const { activeCount } = storeToRefs(taskerStore)
-const { openSettingsModal } = inject('settingsModal', {})
-const activeTaskCount = computed(() => activeCount.value || 0)
 
 // 统计数据
 const basicStats = ref({})
@@ -251,18 +203,6 @@ watch(
     if (activeTab.value !== normalizedTab) activeTab.value = normalizedTab
   }
 )
-
-const openSettings = () => {
-  openSettingsModal?.(userStore.isAdmin ? 'base' : 'account')
-}
-
-const toggleTheme = () => {
-  themeStore.toggleTheme()
-}
-
-const openTaskCenter = () => {
-  taskerStore.openDrawer()
-}
 
 // 打开反馈详情弹窗
 const handleOpenFeedback = () => {

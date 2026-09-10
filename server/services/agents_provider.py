@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-from datadeck.adapters.model_provider import EnvModelProvider
+from datadeck.adapters.platform_model_provider import PlatformModelProvider
 from datadeck.agents.buildin.chatbot.graph import ChatbotAgent
 from datadeck.ports.checkpointer import CheckpointerProvider
 from server.config import settings
@@ -47,11 +47,17 @@ async def get_chatbot_agent() -> ChatbotAgent:
     if _agent is None:
         saver = await _init_saver()
         from server.services.pg_memory_store import PgMemoryStore
+        from server.services.platform_agent_hooks import (
+            platform_context_skills_resolver,
+            platform_extra_middlewares,
+        )
 
         _agent = ChatbotAgent(
-            model_provider=EnvModelProvider(),
+            model_provider=PlatformModelProvider(),
             checkpointer_provider=PgCheckpointerProvider(saver),
             memory_store=PgMemoryStore(),
+            extra_middlewares=platform_extra_middlewares,
+            context_skills_resolver=platform_context_skills_resolver,
         )
     return _agent
 

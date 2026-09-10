@@ -253,7 +253,7 @@ const cardTags = (database) => {
 
 const navigateToDatabase = (database) => {
   if (kbUtils.isReadOnlyDatabase(database)) return
-  router.push({ path: `/extensions/knowledgebase/${database.kb_id}` })
+  router.push({ path: `/knowledge/${database.kb_id}` })
 }
 
 const copyDatabaseId = async (database) => {
@@ -297,7 +297,7 @@ const handleDatabaseAction = (key, database) => {
   }
   if (key === 'edit') {
     router.push({
-      path: `/extensions/knowledgebase/${database.kb_id}`,
+      path: `/knowledge/${database.kb_id}`,
       query: { action: 'edit' }
     })
     return

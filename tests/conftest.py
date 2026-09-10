@@ -13,6 +13,20 @@ TEST_DATABASE_URL = "postgresql+asyncpg://localhost:5432/datadeck_test"
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 assert "datadeck_test" in os.environ["DATABASE_URL"], "测试库防线：必须 datadeck_test"
 
+# ── 测试数据根防线：落到可写临时目录，避免污染/依赖真实数据根 ──────────
+# 沙箱与部分 CI 对仓库外层目录只读；而 dataroot 各目录在**调用时**读取 env
+# （server/dataroot.py 无模块级缓存），因此这里在 import server.* 前统一指向
+# 一个随进程隔离的可写根，保证 init_builtin_skills / UserWorkspace 等写操作可用。
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_TEST_DATA_ROOT = Path(tempfile.mkdtemp(prefix="datadeck-test-data-"))
+os.environ["DATADECK_DATA_ROOT"] = str(_TEST_DATA_ROOT)
+os.environ["DATADECK_SKILL_DATA_DIR"] = str(_TEST_DATA_ROOT / "skill-sources")
+os.environ["DATADECK_SKILL_PROJECTION_DIR"] = str(_TEST_DATA_ROOT / "skill-projections")
+os.environ["DATADECK_USER_DATA_DIR"] = str(_TEST_DATA_ROOT / "user-data")
+os.environ["DATADECK_RUNTIME_DIR"] = str(_TEST_DATA_ROOT / "runtime")
+
 # 测试环境与真实数据源隔离：data_selfcheck/sql_executor 不做真实外呼
 os.environ.pop("DATADECK_SQL_DSN", None)
 

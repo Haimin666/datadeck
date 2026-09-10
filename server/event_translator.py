@@ -26,26 +26,59 @@ from sqlalchemy import text as sa_text
 from server.config import settings
 from server.db import async_session_factory
 from server.models import RunEvent
-from server.utils.datetime_utils import utc_now
+from server.utils.datetime_utils import utc_now_naive
 from server.utils.sse_utils import format_sse, format_heartbeat
 
 # updates 里非 messages 的结构化 state 字段（翻译为 agent_state）
 _AGENT_STATE_KEYS = ("todos", "artifacts", "token_usage", "sql_validation")
 
+# ── 进程内实时事件总线 ──────────────────────────────────────────
+# append_event 落库后立即 publish，poll_run_events 优先消费内存事件、
+# 空闲时才回退 DB 轮询。同一进程内实现真·流式；跨进程/重启由轮询兜底。
+_bus_subscribers: dict[str, set[asyncio.Queue]] = {}
+
+
+def subscribe_run_events(run_id: str) -> asyncio.Queue:
+    q: asyncio.Queue = asyncio.Queue()
+    _bus_subscribers.setdefault(run_id, set()).add(q)
+    return q
+
+
+def unsubscribe_run_events(run_id: str, q: asyncio.Queue) -> None:
+    subs = _bus_subscribers.get(run_id)
+    if not subs:
+        return
+    subs.discard(q)
+    if not subs:
+        _bus_subscribers.pop(run_id, None)
+
+
+def publish_run_event(run_id: str, seq: int, event_type: str, payload: dict) -> None:
+    for q in list(_bus_subscribers.get(run_id, ())):
+        q.put_nowait((seq, event_type, payload))
+
 
 async def append_event(
     run_id: str, event_type: str, payload: dict, thread_id: str | None = None,
 ) -> None:
-    """写入一条 run_events 行（seq 由 DB identity/DEFAULT 赋值，不预分配）。"""
+    """写入一条 run_events 行（seq 由 DB identity/DEFAULT 赋值，不预分配）。
+
+    落库后立即 publish 到进程内总线（同一进程内的 SSE 可近实时消费）；
+    无订阅者时 publish 是空操作，不影响落库语义。
+    """
     async with async_session_factory() as session:
-        session.add(RunEvent(
+        ev = RunEvent(
             id=str(uuid.uuid4()),
             run_id=run_id,
             event_type=event_type,
             payload=payload,
             thread_id=thread_id,
-        ))
+        )
+        session.add(ev)
         await session.commit()
+        await session.refresh(ev)
+        seq = int(ev.seq) if ev.seq is not None else 0
+    publish_run_event(run_id, seq, event_type, payload)
 
 
 def _human_approval_payload(interrupt_value: dict) -> dict:
@@ -70,13 +103,66 @@ def _extract_agent_state(updates: dict) -> dict | None:
     return state or None
 
 
+async def _load_run_run_context(run_id: str) -> tuple[str | None, str | None]:
+    """读取 run 的 request_id 与 thread_id（用于前端 chunk 关联）。"""
+    async with async_session_factory() as session:
+        r = await session.execute(sa_text(
+            "SELECT request_id, thread_id FROM agent_runs WHERE id=:rid"
+        ), {"rid": run_id})
+        row = r.fetchone()
+    if not row:
+        return None, None
+    return row[0], row[1]
+
+
+def _message_delta_chunk(message_id: str, content: str, thread_id: str, request_id: str | None) -> dict:
+    """Yuxi 前端契约：loading chunk 内嵌 stream_event(message_delta)。"""
+    return {
+        "status": "loading",
+        "type": "ai",
+        "id": message_id,
+        "request_id": request_id,
+        "thread_id": thread_id,
+        "stream_event": {
+            "type": "message_delta",
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "content": content,
+        },
+    }
+
+
+def _tool_call_chunk(message_id: str, tc: dict, thread_id: str, request_id: str | None) -> dict:
+    """工具调用 chunk（stream_event.type=tool_call，前端 tool_call_chunks 消费）。"""
+    return {
+        "status": "loading",
+        "request_id": request_id,
+        "thread_id": thread_id,
+        "stream_event": {
+            "type": "tool_call",
+            "message_id": message_id,
+            "tool_call_id": tc.get("id", ""),
+            "name": tc.get("name", ""),
+            "args": tc.get("args", {}),
+            "thread_id": thread_id,
+        },
+    }
+
+
 async def consume_graph_stream(
     graph, run_id: str, thread_id: str, config: dict,
     *,
     initial_input: dict | None = None,
     resume_command: Command | None = None,
+    context: object | None = None,
 ) -> None:
-    """驱动真图流式执行，翻译为事件并落库；interrupt 时置 run=interrupted 并停止。
+    """驱动真图流式执行，翻译为前端可消费事件并落库；interrupt 时置 run=interrupted 并停止。
+
+    事件契约对齐 1:1 迁移的 Yuxi 前端（useAgentRunStream / useAgentStreamHandler）：
+      - message_delta / tool_call → payload={chunk:{status:'loading', stream_event}}
+      - agent_state               → payload={name:'yuxi.agent_state', chunk:{status:'agent_state', agent_state}}
+      - human_approval_required   → payload={reason:'human_approval', chunk:{status:..., approval}}
+      - finished/error            → end / error 事件（前端按 end 收尾）
 
     initial_input: 首轮输入 {"messages": [HumanMessage(...)]}
     resume_command: 审批恢复 Command(resume={"decisions": [...]})
@@ -90,15 +176,19 @@ async def consume_graph_stream(
     interrupts: list = []
     error: Exception | None = None
 
+    request_id, _ = await _load_run_run_context(run_id)
+    # run 内稳定的 AI message_id：所有 message_delta 归入同一条前端消息
+    ai_message_id = f"{run_id}-ai"
+
     async with async_session_factory() as db:
         await db.execute(sa_text(
             "UPDATE agent_runs SET status='running', started_at=:now WHERE id=:rid"
-        ), {"now": utc_now(), "rid": run_id})
+        ), {"now": utc_now_naive(), "rid": run_id})
         await db.commit()
 
     try:
         async for mode, payload in graph.astream(
-            graph_input, config=config, stream_mode=["messages", "updates"],
+            graph_input, config=config, context=context, stream_mode=["messages", "updates"],
         ):
             if mode == "messages":
                 chunk, meta = payload
@@ -109,10 +199,8 @@ async def consume_graph_stream(
                     continue
                 content = chunk.content if isinstance(chunk.content, str) else ""
                 if content:
-                    await append_event(run_id, "stream_event", {
-                        "type": "message_delta",
-                        "delta": {"content": content},
-                        "message": {"role": "assistant", "content": content},
+                    await append_event(run_id, "messages", {
+                        "chunk": _message_delta_chunk(ai_message_id, content, thread_id, request_id),
                     }, thread_id)
             elif mode == "updates":
                 for node, upd in payload.items():
@@ -126,17 +214,17 @@ async def consume_graph_stream(
                     tool_calls = getattr(last, "tool_calls", None) if last is not None else None
                     if tool_calls:
                         for tc in tool_calls:
-                            await append_event(run_id, "stream_event", {
-                                "type": "tool_call",
-                                "tool_call": {
-                                    "id": tc.get("id", ""),
-                                    "name": tc.get("name", ""),
-                                    "args": tc.get("args", {}),
-                                },
+                            await append_event(run_id, "messages", {
+                                "chunk": _tool_call_chunk(ai_message_id, tc, thread_id, request_id),
                             }, thread_id)
                     state = _extract_agent_state(upd)
                     if state:
-                        await append_event(run_id, "agent_state", {"state": state}, thread_id)
+                        await append_event(run_id, "custom", {
+                            "name": "yuxi.agent_state",
+                            "chunk": {"status": "agent_state", "agent_state": state,
+                                      "thread_id": thread_id, "request_id": request_id},
+                            "agent_state": state,
+                        }, thread_id)
     except Exception as exc:  # noqa: BLE001
         error = exc
 
@@ -145,33 +233,60 @@ async def consume_graph_stream(
             await db.execute(sa_text(
                 "UPDATE agent_runs SET status='failed', error_type=:et, error_message=:em, "
                 "finished_at=:now WHERE id=:rid"
-            ), {"et": type(error).__name__, "em": str(error)[:500], "now": utc_now(), "rid": run_id})
+            ), {
+                "et": type(error).__name__, "em": str(error)[:500],
+                "now": utc_now_naive(), "rid": run_id,
+            })
             await db.commit()
             await append_event(run_id, "error", {
-                "error": {"message": str(error)[:500], "type": type(error).__name__},
+                "chunk": {"status": "error", "message": str(error)[:500],
+                          "error_type": type(error).__name__, "request_id": request_id},
             }, thread_id)
-            await append_event(run_id, "finished", {"run": {"id": run_id, "status": "failed"}}, thread_id)
-            await append_event(run_id, "end", {"run": {"id": run_id, "status": "failed"}}, thread_id)
+            await append_event(run_id, "end", {
+                "status": "failed",
+                "chunk": {"status": "finished", "request_id": request_id},
+                "run": {"id": run_id, "status": "failed"},
+            }, thread_id)
             return
 
         if interrupts:
             await db.execute(sa_text(
                 "UPDATE agent_runs SET status='interrupted', finished_at=:now WHERE id=:rid"
-            ), {"now": utc_now(), "rid": run_id})
+            ), {"now": utc_now_naive(), "rid": run_id})
             await db.commit()
             for iv in interrupts:
                 value = iv.value if hasattr(iv, "value") else iv
-                await append_event(run_id, "human_approval_required", {
-                    "interrupt": _human_approval_payload(value or {}),
+                approval = _human_approval_payload(value or {})
+                requests = approval.get("actionRequests") or []
+                review_configs = approval.get("review_configs") or []
+                await append_event(run_id, "interrupt", {
+                    "reason": "human_approval",
+                    "chunk": {
+                        "status": "human_approval_required",
+                        "request_id": request_id,
+                        "thread_id": thread_id,
+                        "run_id": run_id,
+                        # 前端 processApprovalInStream 读 chunk.approval.{action_requests,review_configs}
+                        "approval": {
+                            "action_requests": requests,
+                            "review_configs": review_configs,
+                        },
+                        "tool_calls": approval.get("tool_calls") or [],
+                        "tool_names": approval.get("tool_names") or [],
+                        "actionRequests": requests,
+                    },
                 }, thread_id)
             return
 
         await db.execute(sa_text(
             "UPDATE agent_runs SET status='completed', finished_at=:now WHERE id=:rid"
-        ), {"now": utc_now(), "rid": run_id})
+        ), {"now": utc_now_naive(), "rid": run_id})
         await db.commit()
-        await append_event(run_id, "finished", {"run": {"id": run_id, "status": "completed"}}, thread_id)
-        await append_event(run_id, "end", {"run": {"id": run_id, "status": "completed"}}, thread_id)
+        await append_event(run_id, "end", {
+            "status": "completed",
+            "chunk": {"status": "finished", "request_id": request_id},
+            "run": {"id": run_id, "status": "completed"},
+        }, thread_id)
 
 
 def parse_after_seq(raw: str | None) -> int:
@@ -220,54 +335,70 @@ async def poll_run_events(
 
     yield format_sse(
         {"event": "init", "payload": {"run_id": run_id, "thread_id": thread_id}},
-        event="init", event_id=str(max(cursor - 1, 0)),
+        event="init", event_id=f"{max(cursor - 1, 0)}-0",
     )
 
-    while True:
-        fetched: list = []
-        async with async_session_factory() as session:
-            r = await session.execute(sa_text(
-                "SELECT seq, event_type, payload FROM run_events "
-                "WHERE run_id=:rid AND seq > :seq ORDER BY seq ASC LIMIT 500"
-            ), {"rid": run_id, "seq": cursor})
-            fetched = r.fetchall()
+    sub = subscribe_run_events(run_id)
+    try:
+        while True:
+            fetched: list = []
+            async with async_session_factory() as session:
+                r = await session.execute(sa_text(
+                    "SELECT seq, event_type, payload FROM run_events "
+                    "WHERE run_id=:rid AND seq > :seq ORDER BY seq ASC LIMIT 500"
+                ), {"rid": run_id, "seq": cursor})
+                fetched = r.fetchall()
 
-        if fetched:
-            for seq, event_type, payload in fetched:
-                cursor = int(seq)
-                if isinstance(payload, str):
-                    payload = json.loads(payload)
+            if fetched:
+                for seq, event_type, payload in fetched:
+                    cursor = int(seq)
+                    if isinstance(payload, str):
+                        payload = json.loads(payload)
+                    yield format_sse(
+                        {"event": event_type, "payload": payload or {}},
+                        event=event_type, event_id=f"{seq}-0",
+                    )
+                    if event_type == "end":
+                        return
+                last_beat = loop.time()
+                continue
+
+            # 无新事件：查终态
+            async with async_session_factory() as session:
+                r = await session.execute(sa_text(
+                    "SELECT status FROM agent_runs WHERE id=:rid"
+                ), {"rid": run_id})
+                row2 = r.fetchone()
+            status = row2[0] if row2 else "failed"
+
+            if status in TERMINAL_STATUSES:
                 yield format_sse(
-                    {"event": event_type, "payload": payload or {}},
-                    event=event_type, event_id=str(seq),
+                    {
+                        "event": "end",
+                        "payload": {
+                            "status": status,
+                            "chunk": {"status": "finished"},
+                            "run": {"id": run_id, "status": status},
+                        },
+                    },
+                    event="end", event_id=f"{cursor + 1}-0",
                 )
-            last_beat = loop.time()
-            if cursor > 0 and not _has_more(fetched):
-                # LIMIT 500 未截断说明本批取尽，直接进入下一轮轮询判断
+                return
+
+            # 等待本进程总线信号（append_event 落库即 publish）→ 近实时；
+            # 超时则回退下一次 DB 轮询（覆盖跨进程/重启前事件）。
+            try:
+                await asyncio.wait_for(sub.get(), timeout=settings.sse_poll_interval_seconds)
+            except (asyncio.TimeoutError, TimeoutError):
                 pass
-            continue
 
-        # 无新事件：查终态
-        async with async_session_factory() as session:
-            r = await session.execute(sa_text(
-                "SELECT status FROM agent_runs WHERE id=:rid"
-            ), {"rid": run_id})
-            row2 = r.fetchone()
-        status = row2[0] if row2 else "failed"
-
-        if status in TERMINAL_STATUSES:
-            yield format_sse(
-                {"event": "end", "payload": {"run": {"id": run_id, "status": status}}},
-                event="end", event_id=str(cursor + 1),
-            )
-            return
-
-        if loop.time() - last_beat >= settings.sse_heartbeat_seconds:
-            last_beat = loop.time()
-            yield format_heartbeat()
-        await asyncio.sleep(settings.sse_poll_interval_seconds)
-        if loop.time() > deadline:
-            return
+            if loop.time() - last_beat >= settings.sse_heartbeat_seconds:
+                last_beat = loop.time()
+                yield format_heartbeat()
+            if loop.time() > deadline:
+                return
+    finally:
+        unsubscribe_run_events(run_id, sub)
 
 
 def _has_more(fetched: list) -> bool:

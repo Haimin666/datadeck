@@ -1,5 +1,5 @@
 <template>
-  <div class="login-view" :class="{ 'has-alert': serverStatus === 'error' }">
+  <div class="login-view" :class="{ 'has-alert': serverStatus === 'error', embedded: props.embedded }">
     <!-- 服务状态提示 -->
     <div v-if="serverStatus === 'error'" class="server-status-alert">
       <div class="alert-content">
@@ -298,6 +298,12 @@ import { MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 
 const router = useRouter()
 const route = useRoute()
+const props = defineProps({
+  embedded: {
+    type: Boolean,
+    default: false
+  }
+})
 const userStore = useUserStore()
 const infoStore = useInfoStore()
 const agentStore = useAgentStore()
@@ -307,7 +313,7 @@ const loginBgImage = computed(() => {
   return infoStore.organization?.login_bg || '/login-bg.jpg'
 })
 const brandLogo = computed(() => {
-  return infoStore.organization?.logo || ''
+  return '/logo.png'
 })
 const brandOrgName = computed(() => {
   return infoStore.organization?.name?.trim() || ''
@@ -679,6 +685,83 @@ onUnmounted(() => {
   &.has-alert {
     padding-top: 60px;
   }
+
+  &.embedded {
+    display: block;
+    width: min(390px, 100%);
+    min-height: 0;
+    background: transparent;
+
+    .server-status-alert,
+    .login-navbar,
+    .page-footer,
+    .card-side.is-image {
+      display: none;
+    }
+
+    .login-main {
+      display: block;
+      padding: 0;
+    }
+
+    .login-card {
+      width: 100%;
+      max-width: none;
+      height: auto;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
+      backdrop-filter: none;
+    }
+
+    .card-side.is-form {
+      width: 100%;
+      padding: 0;
+    }
+
+    .form-wrapper {
+      max-width: none;
+      gap: 20px;
+    }
+
+    .form-header {
+      text-align: center;
+
+      .welcome-text {
+        margin: 0;
+        color: var(--main-700);
+        font-size: 13px;
+        letter-spacing: 0.18em;
+      }
+    }
+
+    .login-form {
+      :deep(.ant-form-item-label > label) {
+        color: var(--gray-800);
+        font-size: 12px;
+      }
+
+      :deep(.ant-input-affix-wrapper),
+      :deep(.ant-input) {
+        background: color-mix(in srgb, var(--gray-0) 24%, transparent);
+        border-color: color-mix(in srgb, var(--main-500) 24%, transparent);
+        box-shadow: none;
+      }
+
+      :deep(.ant-input-affix-wrapper:hover),
+      :deep(.ant-input-affix-wrapper-focused),
+      :deep(.ant-input:focus) {
+        background: color-mix(in srgb, var(--gray-0) 42%, transparent);
+        border-color: var(--main-400);
+      }
+
+      :deep(.ant-btn-primary) {
+        border-color: color-mix(in srgb, var(--main-700) 80%, transparent);
+        box-shadow: 0 10px 24px -18px var(--main-700);
+      }
+    }
+  }
 }
 
 /* Unified Navbar */
@@ -768,9 +851,12 @@ onUnmounted(() => {
   width: 900px;
   max-width: 95vw;
   height: 560px;
-  background: var(--gray-0);
+  background: color-mix(in srgb, var(--gray-0) 70%, transparent);
   border-radius: 16px;
-  box-shadow: 0 0px 40px var(--shadow-1);
+  border: 1px solid color-mix(in srgb, var(--gray-300) 50%, transparent);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   display: flex;
   overflow: hidden;
 }
@@ -800,6 +886,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   padding: 40px;
+  background: color-mix(in srgb, var(--gray-0) 50%, transparent);
 }
 
 .form-wrapper {

@@ -160,7 +160,8 @@ export const useUserStore = defineStore('user', () => {
       const data = await authApi.uploadAvatar(file)
 
       // 更新本地头像状态
-      avatar.value = data.avatar_url
+      // 头像接口返回字段为 avatar；兼容旧接口曾使用的 avatar_url。
+      avatar.value = data.avatar || data.avatar_url || ''
 
       return data
     } catch (error) {

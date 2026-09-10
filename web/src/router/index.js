@@ -4,7 +4,6 @@ import BlankLayout from '@/layouts/BlankLayout.vue'
 import { useUserStore } from '@/stores/user'
 import { useAgentStore } from '@/stores/agent'
 import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
-import { sanitizeRedirect } from '@/utils/oidcAutoStart'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -25,7 +24,7 @@ const router = createRouter({
     {
       path: '/login',
       name: 'login',
-      component: () => import('../views/LoginView.vue'),
+      redirect: '/',
       meta: { requiresAuth: false }
     },
     {
@@ -73,6 +72,42 @@ const router = createRouter({
       ]
     },
     {
+      path: '/knowledge',
+      name: 'knowledge',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'KnowledgeComp',
+          component: () => import('../views/KnowledgeView.vue'),
+          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+        },
+        {
+          path: ':kbId',
+          name: 'KnowledgeBaseDetail',
+          component: () => import('../views/DataBaseInfoView.vue'),
+          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true, requiresKnowledge: true }
+        },
+        {
+          path: ':kbId/evaluation/:datasetId',
+          name: 'KnowledgeEvaluationBenchmarkDetail',
+          component: () => import('../views/EvaluationBenchmarkDetailView.vue'),
+          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true, requiresKnowledge: true }
+        }
+      ]
+    },
+    {
+      path: '/scheduled-tasks',
+      name: 'scheduled-tasks',
+      component: AppLayout,
+      children: [{
+        path: '',
+        name: 'ScheduledTasksComp',
+        component: () => import('../views/ScheduledTasksView.vue'),
+        meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+      }]
+    },
+    {
       path: '/dashboard',
       name: 'dashboard',
       component: AppLayout,
@@ -115,24 +150,12 @@ const router = createRouter({
             {
               path: 'knowledgebase/:kbId',
               name: 'ExtensionKnowledgeBaseDetail',
-              component: () => import('../views/DataBaseInfoView.vue'),
-              meta: {
-                keepAlive: false,
-                requiresAuth: true,
-                requiresAdmin: true,
-                requiresKnowledge: true
-              }
+              redirect: (to) => ({ name: 'KnowledgeBaseDetail', params: { kbId: to.params.kbId }, query: to.query })
             },
             {
               path: 'knowledgebase/:kbId/evaluation/:datasetId',
               name: 'ExtensionEvaluationBenchmarkDetail',
-              component: () => import('../views/EvaluationBenchmarkDetailView.vue'),
-              meta: {
-                keepAlive: false,
-                requiresAuth: true,
-                requiresAdmin: true,
-                requiresKnowledge: true
-              }
+              redirect: (to) => ({ name: 'KnowledgeEvaluationBenchmarkDetail', params: to.params, query: to.query })
             },
             {
               path: 'mcp/:slug',
@@ -195,6 +218,11 @@ router.beforeEach(async (to) => {
   const isAdmin = userStore.isAdmin
   const isSuperAdmin = userStore.isSuperAdmin
 
+  // 根路径是统一入口：已有登录态直接进入系统，未登录则展示登录页。
+  if (to.path === '/' && isLoggedIn) {
+    return '/agent'
+  }
+
   // 如果路由需要认证但用户未登录
   if (requiresAuth && !isLoggedIn) {
     // 保存尝试访问的路径，登录后跳转
@@ -234,11 +262,6 @@ router.beforeEach(async (to) => {
 
   if (requiresKnowledge && !runtimeCapabilitiesStore.knowledgeEnabled) {
     return { path: '/extensions', query: { tab: 'skills' } }
-  }
-
-  // 如果用户已登录但访问登录页，按 redirect 参数跳转
-  if (to.path === '/login' && isLoggedIn) {
-    return sanitizeRedirect(to.query.redirect)
   }
 
   // 其他情况正常导航

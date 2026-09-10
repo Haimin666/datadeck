@@ -10,7 +10,6 @@
 - GET /api/agent/thread/{id}/requests、POST .../continue、GET /api/agent/requests/{id}、
   POST .../cancel|steer、GET .../events（队列语义映射到 run）
 - GET /api/agent/runs/{id}/langfuse（占位 {url:null}）
-- /api/tasks（占位空列表）
 """
 
 from __future__ import annotations
@@ -18,16 +17,19 @@ from __future__ import annotations
 import os
 import shutil
 import uuid as _uuid
+import asyncio
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.db import get_db
+from server.db import async_session_factory, get_db
 from server.deps import get_required_user
 from server.models import User
 from server.services import attachment_service as att
+from server.utils.datetime_utils import utc_now_naive
 
 p1 = APIRouter(tags=["attachments"])
 
@@ -230,6 +232,18 @@ async def mention_search(
 
 # ── 请求队列语义映射（Yuxi 队列 → datadeck run） ─────────
 
+@p1.get("/agent/thread/{thread_id}/active_run")
+async def get_thread_active_run(
+    thread_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """线程活跃 run（前端 useAgentRunStream 恢复路径读取 active?.run）。"""
+    from server.routers.chat_router import _get_active_run
+
+    return await _get_active_run(thread_id, current_user.uid, db)
+
+
 @p1.get("/agent/thread/{thread_id}/requests")
 async def list_thread_requests(
     thread_id: str,
@@ -237,17 +251,25 @@ async def list_thread_requests(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """排队请求 = 该 thread 的 runs（最新在前）。"""
+    """排队请求 = 该 thread 尚未终态的 runs（对齐 Yuxi list_queued 语义）。
+
+    只返回 pending/running/cancel_requested/interrupted，避免前端把已完成 run
+    当作可删除的排队项（那会导致 cancel → 409）。
+    """
+    conds = ["thread_id=:t", "uid=:u",
+             "status IN ('pending','running','cancel_requested','interrupted')"]
+    if agent_slug:
+        conds.append("agent_slug=:a")
     r = await db.execute(sa_text(
-        "SELECT id, status, agent_slug, input_payload, created_at, finished_at "
-        "FROM agent_runs WHERE thread_id=:t AND uid=:u ORDER BY created_at DESC LIMIT 50"),
-        {"t": thread_id, "u": current_user.uid})
+        "SELECT id, request_id, status, agent_slug, input_payload, created_at, finished_at "
+        f"FROM agent_runs WHERE {' AND '.join(conds)} ORDER BY created_at ASC LIMIT 50"),
+        {"t": thread_id, "u": current_user.uid, "a": agent_slug})
     return {"requests": [
-        {"id": x[0], "request_id": x[0], "status": x[1], "agent_slug": x[2],
-         "query": (x[3] or {}).get("query", ""), "created_at": str(x[4]),
-         "finished_at": str(x[5]) if x[5] else None}
+        {"id": x[0], "run_id": x[0], "request_id": x[1], "status": x[2],
+         "agent_slug": x[3], "query": (x[4] or {}).get("query", ""),
+         "created_at": str(x[5]), "finished_at": str(x[6]) if x[6] else None}
         for x in r.fetchall()
-    ]}
+    ], "queue": {"status": "idle"}}
 
 
 @p1.get("/agent/requests/{request_id}")
@@ -258,27 +280,35 @@ async def get_request(
 ):
     """请求详情 = run 详情（队列无独立实体）。"""
     r = await db.execute(sa_text(
-        "SELECT id, thread_id, status, agent_slug, input_payload, created_at "
-        "FROM agent_runs WHERE id=:r AND uid=:u"),
+        "SELECT id, request_id, thread_id, status, agent_slug, input_payload, created_at "
+        "FROM agent_runs WHERE (id=:r OR request_id=:r) AND uid=:u"),
         {"r": request_id, "u": current_user.uid})
     x = r.fetchone()
     if not x:
         raise HTTPException(status_code=404, detail="请求不存在")
-    return {"request": {"id": x[0], "request_id": x[0], "thread_id": x[1], "status": x[2],
-                        "agent_slug": x[3], "query": (x[4] or {}).get("query", ""),
-                        "created_at": str(x[5])}}
+    return {"request": {
+        "id": x[0], "run_id": x[0], "request_id": x[1], "thread_id": x[2],
+        "status": x[3], "agent_slug": x[4], "query": (x[5] or {}).get("query", ""),
+        "source": "chat", "run_type": "chat", "created_at": str(x[6]),
+    }}
 
 
 @p1.post("/agent/requests/{request_id}/cancel")
 async def cancel_request(
     request_id: str,
     current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """取消请求 = 取消对应 run（复用既有逻辑）。"""
     from server.services.run_service import request_cancel
 
+    run_id = await db.scalar(sa_text(
+        "SELECT id FROM agent_runs WHERE (id=:r OR request_id=:r) AND uid=:u"
+    ), {"r": request_id, "u": current_user.uid})
+    if not run_id:
+        raise HTTPException(status_code=404, detail="请求不存在")
     try:
-        status = await request_cancel(request_id, current_user.uid)
+        status = await request_cancel(run_id, current_user.uid)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"request_id": request_id, "status": status}
@@ -296,9 +326,26 @@ async def continue_queue(
 
 
 @p1.post("/agent/requests/{request_id}/steer")
-async def steer_request(request_id: str, current_user: User = Depends(get_required_user)):
-    """运行中转向：datadeck 单 agent 暂不支持 → 明确 409 语义。"""
-    raise HTTPException(status_code=409, detail="当前版本不支持运行中转向（steer）")
+async def steer_request(
+    request_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """把 pending 请求提升为线程中的下一条。"""
+    result = await db.execute(sa_text(
+        "UPDATE agent_runs SET input_payload=CAST("
+        "CAST(input_payload AS JSONB) || CAST(:patch AS JSONB) AS JSON), updated_at=:now "
+        "WHERE (id=:r OR request_id=:r) AND uid=:u AND status='pending' RETURNING id"
+    ), {
+        "r": request_id,
+        "u": current_user.uid,
+        "now": utc_now_naive(),
+        "patch": json.dumps({"queue_policy": "steer"}),
+    })
+    if result.fetchone() is None:
+        raise HTTPException(status_code=409, detail="只有排队中的请求可以提升")
+    await db.commit()
+    return {"request_id": request_id, "status": "queued", "queue_policy": "steer"}
 
 
 @p1.get("/agent/requests/{request_id}/events")
@@ -306,47 +353,59 @@ async def stream_request_events(
     request_id: str,
     request: Request,
     current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """请求事件流 = run 事件流（别名转发）。"""
-    from server.event_translator import poll_run_events
-
-    cursor_raw = request.headers.get("Last-Event-ID") or request.query_params.get("after_seq", "0-0")
-    from server.event_translator import parse_after_seq
-
-    after_seq = parse_after_seq(cursor_raw)
+    """排队请求事件：pending → queued；开始执行 → run_created。"""
+    run_id = await db.scalar(sa_text(
+        "SELECT id FROM agent_runs WHERE (id=:r OR request_id=:r) AND uid=:u"
+    ), {"r": request_id, "u": current_user.uid})
+    if not run_id:
+        raise HTTPException(status_code=404, detail="请求不存在")
     from fastapi.responses import StreamingResponse
+    from server.utils.sse_utils import format_heartbeat, format_sse
+
+    async def events():
+        announced_queued = False
+        while True:
+            async with async_session_factory() as session:
+                status = await session.scalar(sa_text(
+                    "SELECT status FROM agent_runs WHERE id=:rid AND uid=:uid"
+                ), {"rid": run_id, "uid": current_user.uid})
+            if status is None:
+                yield format_sse({"event": "failed", "payload": {}}, event="failed")
+                return
+            if status == "pending":
+                if not announced_queued:
+                    yield format_sse(
+                        {"event": "queued", "payload": {"request_id": request_id}},
+                        event="queued",
+                    )
+                    announced_queued = True
+                else:
+                    yield format_heartbeat()
+                await asyncio.sleep(1)
+                continue
+            if status in {"running", "interrupted"}:
+                yield format_sse(
+                    {"event": "run_created", "payload": {"run_id": run_id}},
+                    event="run_created",
+                )
+                return
+            event = "cancelled" if status == "cancelled" else "failed"
+            yield format_sse({"event": event, "payload": {"run_id": run_id}}, event=event)
+            return
 
     return StreamingResponse(
-        poll_run_events(request_id, after_seq=after_seq, current_uid=current_user.uid),
+        events(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
                  "X-Accel-Buffering": "no"},
     )
 
 
-# ── Langfuse / Tasker 占位（优雅降级） ────────────────────
+# ── Langfuse 占位（优雅降级） ─────────────────────────────
 
 @p1.get("/agent/runs/{run_id}/langfuse")
 async def get_langfuse_link(run_id: str, current_user: User = Depends(get_required_user)):
     """未接入 Langfuse：返回空 URL，前端隐藏追踪入口。"""
     return {"url": None, "enabled": False}
-
-
-@p1.get("/tasks")
-async def list_tasks(current_user: User = Depends(get_required_user)):
-    return {"tasks": [], "total": 0}
-
-
-@p1.get("/tasks/{task_id}")
-async def get_task(task_id: str, current_user: User = Depends(get_required_user)):
-    raise HTTPException(status_code=404, detail="任务不存在")
-
-
-@p1.post("/tasks/{task_id}/cancel")
-async def cancel_task(task_id: str, current_user: User = Depends(get_required_user)):
-    raise HTTPException(status_code=404, detail="任务不存在")
-
-
-@p1.delete("/tasks/{task_id}")
-async def delete_task(task_id: str, current_user: User = Depends(get_required_user)):
-    raise HTTPException(status_code=404, detail="任务不存在")

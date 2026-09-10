@@ -37,6 +37,17 @@ export DATADECK_BASE_URL=https://api.deepseek.com/v1
 python -m datadeck
 ```
 
+启动 Web 服务前先升级 PostgreSQL schema：
+
+```bash
+uv run alembic upgrade head
+```
+
 ## 许可
 
 MIT（继承自 Yuxi；仅抽取核心环，保留原架构与注释出处）。
+## 基础文本知识库
+
+启动 PostgreSQL 后执行 `uv run alembic upgrade head`。知识库工作台位于 `/knowledge`，管理员可以创建知识库、上传 TXT/Markdown/CSV/JSON 文件、自动切片、建立 Qdrant 向量索引并测试检索。
+
+Qdrant 默认连接 `http://localhost:6333`。配置 `DATADECK_EMBEDDING_API_KEY` 后启用向量索引；未配置时自动降级为持久化文档上的关键词检索。当前不处理 PDF、图片、OCR、Word 或 Excel。

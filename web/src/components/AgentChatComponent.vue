@@ -1328,7 +1328,7 @@ const agentDefaultModel = computed(
 const currentModelSpec = computed(
   () =>
     selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY] ||
-    currentThread.value?.metadata?.model_spec ||
+    (currentThread.value?.metadata || currentThread.value?.extra_metadata)?.model_spec ||
     agentDefaultModel.value
 )
 const handleModelSelect = (spec) => {
@@ -1348,7 +1348,9 @@ const configuredAgentToolApprovalMode = computed(() => {
 const currentToolApprovalMode = computed(() =>
   resolveToolApprovalMode({
     hasThread: Boolean(currentChatId.value),
-    threadMode: currentThread.value?.metadata?.tool_approval_mode,
+    threadMode:
+      currentThread.value?.tool_approval_mode ||
+      (currentThread.value?.metadata || currentThread.value?.extra_metadata)?.tool_approval_mode,
     agentMode: configuredAgentToolApprovalMode.value,
     savedMode: savedToolApprovalMode.value
   })
@@ -3410,8 +3412,10 @@ const handleApprovalWithStream = async (answer) => {
       agent_slug: currentAgentId.value,
       thread_id: threadId,
       meta: { request_id: requestId },
-      resume: answer,
-      created_by_run_id: interruptedRunId
+      resume: interruptedRunId,
+      ...(pendingInterrupt?.kind === 'tool_approval'
+        ? { tool_approval: answer }
+        : { resume_payload: answer })
     })
     const runId = runResp?.run_id
     if (!runId) {

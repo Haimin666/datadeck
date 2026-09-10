@@ -3,11 +3,21 @@ import { defineStore } from 'pinia'
 
 import { discoveryApi } from '@/apis/system_api'
 
-const DISABLED_FEATURES = Object.freeze({ knowledge: false })
+const DISABLED_FEATURES = Object.freeze({
+  knowledge: false,
+  skills: false,
+  mcp: false,
+  workspace: false,
+  scheduled_tasks: false
+})
 
 function readFeatures(payload) {
   return {
-    knowledge: payload?.capabilities?.features?.knowledge === true
+    knowledge: payload?.capabilities?.features?.knowledge === true,
+    skills: payload?.capabilities?.features?.skills === true,
+    mcp: payload?.capabilities?.features?.mcp === true,
+    workspace: payload?.capabilities?.features?.workspace === true,
+    scheduled_tasks: payload?.capabilities?.features?.scheduled_tasks === true
   }
 }
 
@@ -18,6 +28,10 @@ export const useRuntimeCapabilitiesStore = defineStore('runtime-capabilities', (
   let loadingPromise = null
 
   const knowledgeEnabled = computed(() => features.value.knowledge)
+  const skillsEnabled = computed(() => features.value.skills)
+  const mcpEnabled = computed(() => features.value.mcp)
+  const workspaceEnabled = computed(() => features.value.workspace)
+  const scheduledTasksEnabled = computed(() => features.value.scheduled_tasks)
 
   async function ensureLoaded() {
     if (status.value === 'ready') {
@@ -53,6 +67,10 @@ export const useRuntimeCapabilitiesStore = defineStore('runtime-capabilities', (
     status,
     error,
     knowledgeEnabled,
+    skillsEnabled,
+    mcpEnabled,
+    workspaceEnabled,
+    scheduledTasksEnabled,
     ensureLoaded
   }
 })

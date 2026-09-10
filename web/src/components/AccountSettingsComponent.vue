@@ -17,7 +17,6 @@
           <a-upload
             :show-upload-list="false"
             :before-upload="beforeUpload"
-            @change="handleAvatarChange"
             accept="image/*"
           >
             <div class="avatar-upload" :class="{ uploading: avatarUploading }">
@@ -247,7 +246,7 @@ const validatePhoneNumber = (phone) => {
 }
 
 const beforeUpload = (file) => {
-  const isImage = file.type.startsWith('image/')
+  const isImage = file.type?.startsWith('image/')
   if (!isImage) {
     message.error('只能上传图片文件！')
     return false
@@ -259,23 +258,14 @@ const beforeUpload = (file) => {
     return false
   }
 
-  return true
+  uploadAvatarFile(file)
+  return false
 }
 
-const handleAvatarChange = async (info) => {
-  if (info.file.status === 'uploading') {
-    avatarUploading.value = true
-    return
-  }
-
-  if (info.file.status === 'done') {
-    avatarUploading.value = false
-    return
-  }
-
+const uploadAvatarFile = async (file) => {
   try {
     avatarUploading.value = true
-    await userStore.uploadAvatar(info.file.originFileObj || info.file)
+    await userStore.uploadAvatar(file)
     message.success('头像上传成功！')
   } catch (error) {
     console.error('头像上传失败:', error)

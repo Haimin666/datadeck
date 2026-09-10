@@ -49,3 +49,16 @@ htmlcov/
 
 # 用户上传文件（运行时数据）
 uploads/
+
+# 运行时/工具缓存目录（不入库）
+.pnpm-store/
+.vite/
+.reasonix/
+.uv-cache/
+.ruff_cache/
+.pytest_cache/
+data/
+
+# 架构图生成产物（源为 .architecture.json）
+docs/architecture/*.html
+docs/architecture/*.visual-check.json

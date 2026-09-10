@@ -24,6 +24,18 @@ log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+build_frontend() {
+    if ! command -v pnpm >/dev/null 2>&1; then
+        log_error "未找到 pnpm，请先安装 pnpm"
+        return 1
+    fi
+
+    log_info "构建最新前端代码..."
+    cd "$PROJECT_DIR/web"
+    pnpm build
+    log_info "前端构建完成，后端将使用最新 web/dist"
+}
+
 check_port() {
     # 检查端口是否有 LISTEN 状态的服务
     lsof -ti :$1 -sTCP:LISTEN 2>/dev/null | head -1
@@ -108,7 +120,7 @@ start_frontend() {
 import subprocess, sys, os
 os.chdir('$PROJECT_DIR/web')
 proc = subprocess.Popen(
-    ['npm', 'run', 'dev'],
+    ['pnpm', 'dev'],
     stdout=open('$FRONTEND_LOG', 'w'),
     stderr=subprocess.STDOUT,
     stdin=subprocess.DEVNULL,
@@ -205,6 +217,7 @@ case ${1:-help} in
         echo ""
         echo "=== datadeck 启动 ==="
         echo ""
+        build_frontend
         start_backend
         start_frontend
         show_status
@@ -223,6 +236,8 @@ case ${1:-help} in
         echo ""
         echo "=== datadeck 重启 ==="
         echo ""
+        # 先构建，构建失败时保留当前运行中的服务，避免切换到半成品。
+        build_frontend
         stop_backend
         stop_frontend
         sleep 2

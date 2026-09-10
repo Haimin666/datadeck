@@ -6,7 +6,7 @@ import { isDefaultAllAgentResourceKind } from '@/utils/agentConfigUtils'
 import { handleChatError } from '@/utils/errorHandler'
 
 function normalizeAgent(agent) {
-  const agentId = agent?.agent_id || agent?.slug || agent?.id
+  const agentId = agent?.id || agent?.agent_id || agent?.slug
   return agentId
     ? { ...agent, id: agentId, agent_id: agentId, slug: agent?.slug || agentId }
     : agent
@@ -77,6 +77,13 @@ export const useAgentStore = defineStore(
           delete items[key].x_oap_ui_config
         }
       })
+      if (items.tools && Array.isArray(toolMetadata.value)) {
+        items.tools.options = toolMetadata.value.map((tool) => ({
+          value: tool.slug,
+          name: tool.name,
+          description: tool.description
+        }))
+      }
       return items
     })
 

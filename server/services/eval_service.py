@@ -17,7 +17,7 @@ from datetime import datetime
 from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, JSON, String, Text
 
 from server.models import Base
-from server.utils.datetime_utils import utc_now
+from server.utils.datetime_utils import utc_now_naive
 
 
 class EvaluationCase(Base):
@@ -32,7 +32,7 @@ class EvaluationCase(Base):
     expect_class = Column(String(32), nullable=False)  # metric/schema/data/chat
     expect_tools = Column(JSON, nullable=False, default=list)  # 期望被调用的工具名（任一）
     expect_keywords = Column(JSON, nullable=False, default=list)  # 回答必须含的关键词（命中即忠实）
-    created_at = Column(DateTime, default=utc_now, nullable=False)
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
 
 
 class EvaluationRun(Base):
@@ -47,7 +47,7 @@ class EvaluationRun(Base):
     tool_accuracy = Column(Integer, nullable=True)  # 百分比 0-100
     faithfulness = Column(Integer, nullable=True)  # 关键词命中百分比
     details = Column(JSON, nullable=False, default=list)  # 每 case 判定明细
-    created_at = Column(DateTime, default=utc_now, nullable=False)
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
 
 
 def judge_case(answer_text: str, called_tools: list[str],

@@ -17,7 +17,7 @@ import uuid
 from sqlalchemy import Column, DateTime, Index, Integer, String, Text
 
 from server.models import Base
-from server.utils.datetime_utils import utc_now
+from server.utils.datetime_utils import utc_now_naive
 
 # 存储根：项目下 uploads/threads/<thread_id>/<file>
 STORAGE_ROOT = os.path.realpath(
@@ -41,7 +41,7 @@ class ThreadAttachment(Base):
     parsed_object_name = Column(String(128), nullable=True)         # 解析产物对象名
     parse_method = Column(String(32), nullable=True)
     status = Column(String(32), nullable=False, default="confirmed")  # tmp/parsed/confirmed
-    created_at = Column(DateTime, default=utc_now, nullable=False)
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
 
     def to_dict(self) -> dict:
         return {

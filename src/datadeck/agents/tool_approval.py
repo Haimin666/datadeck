@@ -11,11 +11,11 @@ from typing import Literal
 
 from langchain.agents.middleware import HumanInTheLoopMiddleware
 
-ToolApprovalMode = Literal["default", "always_trust"]
+ToolApprovalMode = Literal["default", "always_trust", "none"]
 
 DEFAULT_TOOL_APPROVAL_MODE: ToolApprovalMode = "default"
-TOOL_APPROVAL_MODES = frozenset({"default", "always_trust"})
-SENSITIVE_BACKEND_TOOLS = frozenset({"write_file", "edit_file", "execute"})
+TOOL_APPROVAL_MODES = frozenset({"default", "always_trust", "none"})
+SENSITIVE_BACKEND_TOOLS = frozenset({"write_file", "edit_file", "execute", "workspace_write_file"})
 _ALLOWED_DECISIONS = ["approve", "reject"]
 
 
@@ -32,7 +32,7 @@ def create_tool_approval_middleware(
     current_project_path: str | None = None,
 ):
     """按审批模式与当前 Project 构造敏感工具审批中间件。"""
-    if mode == "always_trust":
+    if mode in {"always_trust", "none"}:
         return None
 
     write_requires_approval = _project_write_requires_approval(current_project_path or "")
@@ -42,6 +42,7 @@ def create_tool_approval_middleware(
             "write_file": {"allowed_decisions": _ALLOWED_DECISIONS, "when": write_requires_approval},
             "edit_file": {"allowed_decisions": _ALLOWED_DECISIONS, "when": write_requires_approval},
             "execute": {"allowed_decisions": _ALLOWED_DECISIONS},
+            "workspace_write_file": {"allowed_decisions": _ALLOWED_DECISIONS},
         }
     )
 

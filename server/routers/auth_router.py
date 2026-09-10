@@ -1,7 +1,6 @@
 """认证路由：登录、初始化管理员、/me、用户管理 CRUD。"""
 from __future__ import annotations
 
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -13,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.db import get_db
 from server.deps import get_optional_user, get_required_user
 from server.models import User
+from server.services.operation_log_service import log_operation
 from server.utils.auth import create_access_token, hash_password, verify_password
+from server.utils.datetime_utils import utc_now_naive
 from server.config import settings
 
 func_count = sa_func.count
@@ -42,7 +43,7 @@ async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = 
     user = result.scalar_one_or_none()
     if not user or not verify_password(form.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
-    user.last_login = datetime.utcnow()
+    user.last_login = utc_now_naive()
     await db.commit()
     token = create_access_token(str(user.id))
     return TokenResponse(
@@ -68,6 +69,8 @@ async def initialize(body: InitializeRequest, db: AsyncSession = Depends(get_db)
         role=body.role,
     )
     db.add(user)
+    await db.flush()
+    await log_operation(db, user.id, "user.create", f"username={body.username};role={body.role};domain=default")
     await db.commit()
     await db.refresh(user)
     token = create_access_token(str(user.id))
@@ -115,7 +118,8 @@ async def list_users(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """用户列表（需登录，管理员语义由前端 apiAdminGet 保证）。"""
+    """用户列表（管理员）。"""
+    _require_admin(current_user)
     result = await db.execute(
         select(User).where(User.is_deleted == 0).order_by(User.id).offset(skip).limit(limit))
     return [u.to_dict() for u in result.scalars().all()]
@@ -191,6 +195,7 @@ async def create_user(
         role=body.role, domain=body.domain or "default",
     )
     db.add(user)
+    await log_operation(db, current_user.id, "user.create", f"target_user={user.id};username={user.username};role={user.role};domain={user.domain}")
     await db.commit()
     await db.refresh(user)
     return user.to_dict()
@@ -218,6 +223,7 @@ async def update_user(
         user.domain = body["domain"]
     if body.get("password"):
         user.password_hash = hash_password(body["password"])
+    await log_operation(db, current_user.id, "user.update", f"target_user={user.id}")
     await db.commit()
     await db.refresh(user)
     return user.to_dict()
@@ -237,6 +243,7 @@ async def delete_user(
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
     user.is_deleted = 1  # 软删除
+    await log_operation(db, current_user.id, "user.delete", f"target_user={user.id}")
     await db.commit()
     return {"ok": True}
 
@@ -276,7 +283,8 @@ async def upload_avatar(
     data = await file.read()
     if len(data) > 5 * 1024 * 1024:
         raise HTTPException(status_code=422, detail="头像不能超过 5MB")
-    upload_dir = os.path.join(os.path.dirname(__file__), "..", "uploads", "avatars")
+    # 头像使用独立目录，由 main.py 以 /uploads/avatars 提供静态访问。
+    upload_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads", "avatars"))
     os.makedirs(upload_dir, exist_ok=True)
     name = f"{_uuid.uuid4().hex}{ext}"
     with open(os.path.join(upload_dir, name), "wb") as f:

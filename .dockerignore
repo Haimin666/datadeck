@@ -1,0 +1,17 @@
+.git
+.env
+.env.docker
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+web/node_modules
+web/dist
+uploads
+server/uploads
+tests
+docs
+*.log

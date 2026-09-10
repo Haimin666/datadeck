@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.db import get_db
 from server.deps import get_required_user
 from server.models import User
-from server.utils.datetime_utils import utc_now
+from server.utils.datetime_utils import utc_now_naive
 
 dashboard = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -39,8 +39,8 @@ async def get_stats(
     total_feedbacks = await _fetch_one(db, "SELECT COUNT(*) FROM message_feedback")
 
     # 近 7 天环比（对话=thread 维度）
-    week_ago = (utc_now() - timedelta(days=7))
-    prev_week = (utc_now() - timedelta(days=14))
+    week_ago = (utc_now_naive() - timedelta(days=7))
+    prev_week = (utc_now_naive() - timedelta(days=14))
     recent = await _fetch_one(
         db, "SELECT COUNT(*) FROM threads WHERE created_at >= :w", {"w": week_ago})
     prev = await _fetch_one(
@@ -72,7 +72,7 @@ async def get_user_stats(
     r = await db.execute(sa_text(
         "SELECT role, COUNT(*) FROM users WHERE is_deleted=0 GROUP BY role ORDER BY 2 DESC"))
     role_dist = [{"role": row[0], "count": row[1]} for row in r.fetchall()]
-    month_ago = (utc_now() - timedelta(days=30))
+    month_ago = (utc_now_naive() - timedelta(days=30))
     active = await _fetch_one(
         db, "SELECT COUNT(*) FROM users WHERE is_deleted=0 AND last_login >= :m", {"m": month_ago})
     new_users = await _fetch_one(
@@ -127,15 +127,15 @@ async def get_agent_stats(
 
 @dashboard.get("/stats/threads")
 async def get_thread_stats(
-    time_range: str = Query("7d", pattern="^(1d|7d|30d|90d)$"),
+    time_range: str = Query("30days", pattern="^(7days|14days|30days|90days)$"),
     agent_id: str = Query(""),
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
     """线程趋势：按天新增 thread / run 数（threads Tab 消费）。"""
     _require_admin(current_user)
-    days = {"1d": 1, "7d": 7, "30d": 30, "90d": 90}[time_range]
-    since = utc_now() - timedelta(days=days)
+    days = {"7days": 7, "14days": 14, "30days": 30, "90days": 90}[time_range]
+    since = utc_now_naive() - timedelta(days=days)
     params: dict = {"since": since}
     agent_cond = ""
     if agent_id:
@@ -303,28 +303,63 @@ async def get_dashboard_users(
 
 @dashboard.get("/stats/calls/timeseries")
 async def get_call_timeseries(
-    type: str = Query("conversations", pattern="^(conversations|runs|errors)$"),
-    time_range: str = Query("7d", pattern="^(1d|7d|30d|90d)$"),
+    type: str = Query("models", pattern="^(models|agents|tokens|tools)$"),
+    time_range: str = Query("14days", pattern="^(14hours|14days|14weeks)$"),
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """调用时间序列（真实按天聚合，PG generate_series 填充空档）。"""
+    """调用时间序列（前端 CallStatsComponent 契约）。
+
+    返回 {data:[{date, data:{<category>:count}}], categories:[...], agent_names:{}}。
+    datadeck 单 agent 栈：按 agent_slug 聚合 agent_runs（models/tokens 无独立维度时同样
+    以 agent_slug 呈现，保证前端图表可用）。
+    """
     _require_admin(current_user)
-    days = {"1d": 1, "7d": 7, "30d": 30, "90d": 90}[time_range]
-    since_date = (utc_now() - timedelta(days=days)).date()
-    table, col = ("agent_runs", "created_at")
-    status_cond = ""
-    if type == "errors":
-        status_cond = " AND status='failed'"
+    if time_range == "14hours":
+        unit, step, count = "hour", "1 hour", 14
+    elif time_range == "14weeks":
+        unit, step, count = "week", "1 week", 14
+    else:
+        unit, step, count = "day", "1 day", 14
+
+    fmt = {"hour": "YYYY-MM-DD HH24:00", "day": "YYYY-MM-DD", "week": "IYYY-IW"}[unit]
+    since = utc_now_naive() - timedelta(
+        hours=count - 1 if unit == "hour" else 0,
+        days=(count - 1) if unit == "day" else (7 * (count - 1) if unit == "week" else 0),
+    )
+    if unit == "week":
+        since = since - timedelta(days=since.weekday())
+
+    status_cond = " AND status='failed'" if type == "tools" else ""
     r = await db.execute(sa_text(f"""
-        SELECT to_char(d.day, 'YYYY-MM-DD') AS date, COALESCE(c.cnt, 0) AS count
-        FROM generate_series(CAST(:since_date AS date), CURRENT_DATE, interval '1 day') AS d(day)
+        SELECT to_char(d.bucket, :fmt) AS date,
+               COALESCE(b.category, 'default-chatbot') AS category,
+               COALESCE(b.cnt, 0) AS count
+        FROM generate_series(date_trunc(:unit, CAST(:since AS timestamp)),
+                             date_trunc(:unit, CURRENT_TIMESTAMP), interval '{step}') AS d(bucket)
         LEFT JOIN (
-            SELECT {col}::date AS dd, COUNT(*) AS cnt
-            FROM {table} WHERE {col} >= :since{status_cond}
-            GROUP BY dd
-        ) c ON c.dd = d.day
-        ORDER BY d.day
-    """), {"since_date": since_date, "since": since_date})
-    return {"data": [{"date": d, "count": c} for d, c in r.fetchall()], "type": type,
-            "time_range": time_range}
+            SELECT date_trunc(:unit, created_at) AS bucket, agent_slug AS category, COUNT(*) AS cnt
+            FROM agent_runs WHERE created_at >= :since{status_cond}
+            GROUP BY bucket, category
+        ) b ON b.bucket = d.bucket
+        ORDER BY d.bucket
+    """), {"fmt": fmt, "unit": unit, "since": since})
+
+    categories: list[str] = []
+    buckets: dict[str, dict] = {}
+    order: list[str] = []
+    for date, category, cnt in r.fetchall():
+        if date not in buckets:
+            buckets[date] = {}
+            order.append(date)
+        buckets[date][category] = int(cnt or 0)
+        if category not in categories:
+            categories.append(category)
+
+    return {
+        "data": [{"date": d, "data": buckets[d]} for d in order],
+        "categories": categories,
+        "agent_names": {c: c for c in categories},
+        "type": type,
+        "time_range": time_range,
+    }

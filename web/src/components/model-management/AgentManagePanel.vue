@@ -1,12 +1,13 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { Plus, RefreshCw, Trash2, SquarePen, Bot, ChevronRight } from '@lucide/vue'
+import { Plus, RefreshCw, Trash2, SquarePen, Bot, ChevronRight, Clock } from '@lucide/vue'
 import { useRouter } from 'vue-router'
 
 import { agentApi } from '@/apis/agent_api'
 import AgentEditModal from '@/components/model-management/AgentEditModal.vue'
 import { isBuiltinAgent, useAgentStore } from '@/stores/agent'
+import { useUserStore } from '@/stores/user'
 import PageShoulder from '@/components/shared/PageShoulder.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
@@ -15,6 +16,7 @@ import { generatePixelAvatar } from '@/utils/pixelAvatar'
 import { getShareConfigLabel } from '@/utils/shareConfig'
 
 const agentStore = useAgentStore()
+const userStore = useUserStore()
 const router = useRouter()
 const agentLoading = ref(false)
 const searchQuery = ref('')
@@ -24,7 +26,7 @@ const managedAgents = ref([])
 const agentEditModalRef = ref(null)
 
 const normalizeAgent = (agent) => {
-  const agentId = agent?.agent_id || agent?.slug || agent?.id
+  const agentId = agent?.id || agent?.agent_id || agent?.slug
   return agentId
     ? { ...agent, id: agentId, agent_id: agentId, slug: agent?.slug || agentId }
     : agent
@@ -81,8 +83,8 @@ const loadAgentBackends = async () => {
   try {
     const response = await agentApi.getAgentBackends()
     agentBackendOptions.value = (response.backends || []).map((backend) => ({
-      label: backend.name || backend.backend_id,
-      value: backend.backend_id
+      label: backend.name || backend.id || backend.backend_id,
+      value: backend.id || backend.backend_id
     }))
   } catch (error) {
     message.error(error.message || '加载智能体后端失败')
@@ -102,6 +104,10 @@ const loadAgents = async () => {
 }
 
 const openCreateAgentModal = () => {
+  if (!userStore.isAdmin) {
+    message.warning('仅管理员可以新增智能体')
+    return
+  }
   agentEditModalRef.value?.openCreate()
 }
 
@@ -115,11 +121,19 @@ const openAgentChat = (agent) => {
   router.push({ name: 'AgentComp', query: { agent_id: agent.id } })
 }
 
+const openScheduledTaskCreate = (agent) => {
+  router.push({ name: 'ScheduledTasksComp', query: { agent_slug: agent.slug || agent.id } })
+}
+
 const refreshAgentLists = async () => {
   await Promise.all([loadAgents(), agentStore.fetchAgents()])
 }
 
 const deleteAgent = async (agent) => {
+  if (!userStore.isAdmin) {
+    message.warning('仅管理员可以删除智能体')
+    return
+  }
   if (isBuiltinAgent(agent)) {
     message.warning('内置智能体不能删除')
     return
@@ -136,7 +150,11 @@ const deleteAgent = async (agent) => {
         await refreshAgentLists()
         message.success('智能体已删除')
       } catch (error) {
-        message.error(error.message || '删除智能体失败')
+        message.error(
+          error.status === 409
+            ? '该智能体仍被定时任务引用，请先删除或改绑任务'
+            : error.message || '删除智能体失败'
+        )
       }
     }
   })
@@ -157,7 +175,12 @@ defineExpose({
   <div class="agent-manage-panel">
     <PageShoulder v-model:search="searchQuery" search-placeholder="搜索智能体...">
       <template #actions>
-        <a-button type="primary" class="lucide-icon-btn" @click="openCreateAgentModal">
+        <a-button
+          v-if="userStore.isAdmin"
+          type="primary"
+          class="lucide-icon-btn"
+          @click="openCreateAgentModal"
+        >
           <Plus :size="14" />
           新增智能体
         </a-button>
@@ -208,6 +231,12 @@ defineExpose({
                   <span class="lucide-menu-item">
                     <SquarePen :size="14" />
                     <span>编辑智能体</span>
+                  </span>
+                </a-menu-item>
+                <a-menu-item key="schedule" @click.stop="openScheduledTaskCreate(agent)">
+                  <span class="lucide-menu-item">
+                    <Clock :size="14" />
+                    <span>创建定时任务</span>
                   </span>
                 </a-menu-item>
                 <a-menu-item

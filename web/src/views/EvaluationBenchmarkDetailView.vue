@@ -606,7 +606,7 @@ const downloadDataset = async () => {
   }
 }
 
-const backToKnowledgeList = () => router.push({ path: '/extensions', query: { tab: 'knowledge' } })
+const backToKnowledgeList = () => router.push({ path: '/knowledge' })
 const backToKnowledgeEvaluation = () =>
   router.push({
     name: 'ExtensionKnowledgeBaseDetail',

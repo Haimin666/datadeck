@@ -165,11 +165,23 @@ test('能力发现瞬时失败后保持 fail-closed，并允许下一次调用�
 
     const runtimeCapabilitiesStore = await prepareStores(server)
 
-    assert.deepEqual(await runtimeCapabilitiesStore.ensureLoaded(), { knowledge: false })
+    assert.deepEqual(await runtimeCapabilitiesStore.ensureLoaded(), {
+      knowledge: false,
+      skills: false,
+      mcp: false,
+      workspace: false,
+      scheduled_tasks: false
+    })
     assert.equal(runtimeCapabilitiesStore.status, 'error')
     assert.equal(runtimeCapabilitiesStore.knowledgeEnabled, false)
 
-    assert.deepEqual(await runtimeCapabilitiesStore.ensureLoaded(), { knowledge: true })
+    assert.deepEqual(await runtimeCapabilitiesStore.ensureLoaded(), {
+      knowledge: true,
+      skills: false,
+      mcp: false,
+      workspace: false,
+      scheduled_tasks: false
+    })
     assert.equal(attempts, 2)
     assert.equal(runtimeCapabilitiesStore.status, 'ready')
     assert.equal(runtimeCapabilitiesStore.error, null)

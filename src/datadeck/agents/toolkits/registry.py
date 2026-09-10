@@ -69,6 +69,13 @@ def tool(
         )
         tool_obj.handle_tool_error = True
         _all_tool_instances.append(tool_obj)
+        # 注册发生在运行期时，让工具元数据快照立即失效；导入期循环依赖则安全忽略。
+        try:
+            from datadeck.agents.toolkits.service import invalidate_tool_metadata_cache
+        except ImportError:
+            pass
+        else:
+            invalidate_tool_metadata_cache()
         return tool_obj
 
     return decorator

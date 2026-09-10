@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "DataDeck 系统架构",
+    "output": "datadeck.architecture.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1200, 540],
+    "views": [
+      {
+        "id": "request-to-agent",
+        "label": "请求与智能体路径",
+        "focus": ["users", "web_spa", "fastapi", "tasker", "agent_core", "model_adapter", "model_providers"],
+        "note": "从浏览器请求进入 FastAPI，再由后台任务执行 ChatbotAgent 并调用模型服务。"
+      },
+      {
+        "id": "state-and-streaming",
+        "label": "状态与流式事件",
+        "focus": ["fastapi", "postgres", "agent_core"],
+        "note": "查看运行事件落库、SSE 回放与智能体状态持久化。"
+      },
+      {
+        "id": "model-dependencies",
+        "label": "模型依赖",
+        "focus": ["model_adapter", "model_providers"],
+        "note": "模型规格从 Redis 缓存读取，缺失时回退环境变量配置。"
+      }
+    ]
+  },
+  "components": [
+    { "id": "users", "type": "external", "label": "用户", "sublabel": "浏览器", "pos": [40, 90], "size": [140, 64] },
+    { "id": "web_spa", "type": "frontend", "label": "Vue 3 SPA", "sublabel": "Vite · Pinia · Ant Design Vue", "pos": [220, 90], "size": [190, 76] },
+    { "id": "fastapi", "type": "backend", "label": "FastAPI 应用", "sublabel": "/api · SSE · 认证", "pos": [482, 90], "size": [220, 84] },
+    { "id": "tasker", "type": "backend", "label": "Tasker", "sublabel": "asyncio 队列 · 后台运行", "pos": [766, 90], "size": [190, 76] },
+    { "id": "agent_core", "type": "backend", "label": "datadeck 智能体核心", "sublabel": "BaseAgent · ChatbotAgent", "pos": [690, 260], "size": [210, 88] },
+    { "id": "model_adapter", "type": "backend", "label": "平台模型适配器", "sublabel": "ModelProvider · Redis 缓存", "pos": [982, 260], "size": [200, 80] },
+    { "id": "postgres", "type": "database", "label": "PostgreSQL", "sublabel": "业务数据 · run_events · checkpoint", "pos": [690, 420], "size": [210, 76] },
+    { "id": "model_providers", "type": "external", "label": "模型服务商", "sublabel": "OpenAI-compatible HTTPS", "pos": [982, 420], "size": [190, 76] }
+  ],
+  "connections": [
+    { "id": "users-to-web", "from": "users", "to": "web_spa", "label": "访问", "variant": "emphasis" },
+    { "id": "web-to-api", "from": "web_spa", "to": "fastapi", "label": "REST /api", "variant": "emphasis", "labelAt": [431, 74] },
+    { "id": "api-to-tasker", "from": "fastapi", "to": "tasker", "label": "enqueue", "variant": "emphasis", "labelAt": [734, 74] },
+    { "id": "tasker-to-agent", "from": "tasker", "to": "agent_core", "label": "执行 run", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "labelAt": [795, 220] },
+    { "id": "agent-to-model-adapter", "from": "agent_core", "to": "model_adapter", "label": "ModelProvider", "variant": "emphasis", "fromSide": "right", "toSide": "left", "labelAt": [941, 230] },
+    { "id": "model-adapter-to-providers", "from": "model_adapter", "to": "model_providers", "label": "HTTPS", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "labelAt": [1082, 370] },
+    { "id": "fastapi-to-web-sse", "from": "fastapi", "to": "web_spa", "label": "SSE events", "variant": "dashed", "fromSide": "top", "toSide": "top", "via": [[592, 36], [315, 36]], "labelAt": [450, 16] },
+    { "id": "api-to-postgres", "from": "fastapi", "to": "postgres", "label": "SQLAlchemy asyncpg", "fromSide": "bottom", "toSide": "top" },
+    { "id": "agent-to-postgres", "from": "agent_core", "to": "postgres", "label": "checkpoint / memory", "fromSide": "bottom", "toSide": "top", "labelAt": [795, 362] }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "请求路径",
+      "items": [
+        "Vue 3 SPA 通过 /api 调用 FastAPI",
+        "Tasker 使用 asyncio 队列派发后台运行",
+        "SSE 以 run_events 表为唯一事件来源"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "智能体核心",
+      "items": [
+        "ChatbotAgent 由 datadeck BaseAgent 构建",
+        "PostgreSQL 保存 LangGraph checkpoint 与记忆",
+        "平台依赖通过 ports/adapters 注入核心库"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "模型配置",
+      "items": [
+        "模型规格优先读取 Redis 缓存",
+        "缓存缺失时回退环境变量配置",
+        "服务商调用使用 OpenAI-compatible HTTPS"
+      ]
+    }
+  ]
+}

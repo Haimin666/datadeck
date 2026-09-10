@@ -14,7 +14,6 @@ DSN 不可用时静默放行（占位原则：跑不通不阻塞链路）。
 from __future__ import annotations
 
 import re
-import threading
 import time
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
@@ -50,54 +49,8 @@ def extract_sql(text: str) -> str | None:
 
 
 def _fetch_schema_map(force: bool = False) -> dict[str, set[str]] | None:
-    """{table_lower: {column_lower...}}；DSN 不可用/失败返回 None（静默放行）。带 TTL 缓存。"""
-    if not sql_dsn():
-        return None
-    now = time.monotonic()
-    if not force and _schema_cache["map"] is not None and now - _schema_cache["at"] < _SCHEMA_CACHE_TTL:
-        return _schema_cache["map"]
-    try:
-        import asyncio
-
-        holder: list = []
-
-        async def q():
-            import asyncpg
-
-            conn = await asyncpg.connect(
-                sql_dsn().replace("postgresql://", "postgres://", 1))
-            try:
-                rows = await conn.fetch(
-                    "SELECT table_name, column_name FROM information_schema.columns "
-                    "WHERE table_schema NOT IN ('pg_catalog','information_schema')")
-                return rows
-            finally:
-                await conn.close()
-
-        def runner():
-            try:
-                holder.append(asyncio.run(q()))
-            except Exception as exc:  # noqa: BLE001
-                holder.append(exc)
-
-        t = threading.Thread(target=runner, daemon=True)
-        t.start()
-        t.join(timeout=5)
-        if not holder:
-            return None
-        rows = holder[0]
-        if isinstance(rows, Exception):
-            logger.warning(f"数据自检：元数据获取失败，跳过 ({str(rows)[:120]})")
-            return None
-        m: dict[str, set[str]] = {}
-        for r in rows:
-            m.setdefault(r["table_name"].lower(), set()).add(r["column_name"].lower())
-        _schema_cache["map"] = m
-        _schema_cache["at"] = now
-        return m
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"数据自检异常，跳过: {str(exc)[:120]}")
-        return None
+    """同步 hook 不访问异步数据库；schema 查询由 ``_async_schema_map`` 完成。"""
+    return None
 
 
 def check_sql_against_schema(sql: str, schema_map: dict[str, set[str]]) -> list[str]:
@@ -129,7 +82,59 @@ class DataSelfCheckMiddleware(AgentMiddleware):
         return self._check(dict(state))
 
     async def aafter_model(self, state, runtime):  # noqa: ARG002
-        return self._check(dict(state))
+        return await self._acheck(dict(state))
+
+    async def _acheck(self, state: dict):
+        """异步 middleware 路径，直接使用 asyncpg，不嵌套事件循环。"""
+        messages = list(state.get("messages") or [])
+        if not messages:
+            return None
+        content = getattr(messages[-1], "content", None)
+        if not isinstance(content, str) or not content.strip():
+            return None
+        sql = extract_sql(content)
+        if not sql:
+            return {"data_retry_attempts": 0} if state.get("data_retry_attempts") else None
+        schema_map = await self._async_schema_map()
+        return self._check_with_schema(state, content, sql, schema_map)
+
+    async def _async_schema_map(self) -> dict[str, set[str]] | None:
+        if not sql_dsn():
+            return None
+        now = time.monotonic()
+        if _schema_cache["map"] is not None and now - _schema_cache["at"] < _SCHEMA_CACHE_TTL:
+            return _schema_cache["map"]
+        try:
+            import asyncpg
+            conn = await asyncpg.connect(sql_dsn().replace("postgresql://", "postgres://", 1))
+            try:
+                rows = await conn.fetch(
+                    "SELECT table_name, column_name FROM information_schema.columns "
+                    "WHERE table_schema NOT IN ('pg_catalog','information_schema')")
+            finally:
+                await conn.close()
+            schema_map: dict[str, set[str]] = {}
+            for row in rows:
+                schema_map.setdefault(row["table_name"].lower(), set()).add(row["column_name"].lower())
+            _schema_cache.update({"map": schema_map, "at": now})
+            return schema_map
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"数据自检：异步元数据获取失败，跳过 ({str(exc)[:120]})")
+            return None
+
+    def _check_with_schema(self, state: dict, content: str, sql: str,
+                           schema_map: dict[str, set[str]] | None):
+        if schema_map is None:
+            return None
+        attempts = int(state.get("data_retry_attempts") or 0)
+        problems = check_sql_against_schema(sql, schema_map)
+        if not problems:
+            return {"data_retry_attempts": 0}
+        if attempts >= self._max_reflect:
+            return {"data_retry_attempts": 0, "messages": [AIMessage(content=content + _GAVE_UP_SUFFIX)]}
+        body = "\n".join(f"- {p}" for p in problems)
+        return {"jump_to": "model", "data_retry_attempts": attempts + 1,
+                "messages": [AIMessage(content=f"{FEEDBACK_PREFIX} SQL 与真实数据源不符，请修正后重新作答：\n{body}")]}
 
     def _check(self, state: dict):
         messages = list(state.get("messages") or [])

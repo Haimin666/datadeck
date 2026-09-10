@@ -19,6 +19,7 @@ import math
 import os
 import re
 import uuid
+from threading import RLock
 from typing import Any
 
 from datadeck import logger
@@ -244,11 +245,12 @@ def add_document(doc_id: str, title: str, content: str, metadata: dict | None = 
 
 def delete_document(doc_id: str) -> dict[str, Any]:
     """增量删除：Qdrant 按 payload.doc_id 过滤删除 + BM25 摘除。"""
-    removed_bm25 = [cid for cid in _chunk_store if _chunk_store[cid].get("doc_id") == doc_id]
-    for cid in removed_bm25:
-        _chunk_store.pop(cid, None)
-    if removed_bm25:
-        _bm25_cache.pop(f"{COLLECTION}:all", None)
+    with _bm25_lock:
+        removed_bm25 = [cid for cid, chunk in _chunk_store.items() if chunk.get("doc_id") == doc_id]
+        for cid in removed_bm25:
+            _chunk_store.pop(cid, None)
+        if removed_bm25:
+            _bm25_cache.pop(f"{COLLECTION}:all", None)
 
     qdrant_ok = None
     if embedding_configured() and ensure_collection():
@@ -319,11 +321,13 @@ def _rrf_fuse(vector_hits: list[dict], bm25_hits: list[tuple[str, dict]], k: int
 
 # BM25 全库索引（进程内缓存；文档量小时足够，生产可换 PG/ES）
 _bm25_cache: dict[str, BM25Index] = {}
+_bm25_lock = RLock()
 
 
 def _bm25_search(query: str, top_k: int = 10) -> list[tuple[str, dict]]:
     hits = _bm25_all_index().search(query, top_k)
-    return [(cid, _chunk_store.get(cid, {})) for cid, _ in hits]
+    with _bm25_lock:
+        return [(cid, dict(_chunk_store[cid])) for cid, _ in hits if cid in _chunk_store]
 
 
 _chunk_store: dict[str, dict] = {}
@@ -331,20 +335,22 @@ _chunk_store: dict[str, dict] = {}
 
 def _bm25_all_index() -> BM25Index:
     key = f"{COLLECTION}:all"
-    if key in _bm25_cache:
+    with _bm25_lock:
+        if key in _bm25_cache:
+            return _bm25_cache[key]
+        index = BM25Index()
+        for cid, payload in _chunk_store.items():
+            title = payload.get("title", "")
+            index.add(cid, f"{title}\n{payload.get('content', '')}")
+        _bm25_cache[key] = index.build()
         return _bm25_cache[key]
-    index = BM25Index()
-    for cid, payload in _chunk_store.items():
-        title = payload.get("title", "")
-        index.add(cid, f"{title}\n{payload.get('content', '')}")
-    _bm25_cache[key] = index.build()
-    return _bm25_cache[key]
 
 
 def _register_chunk(chunk_id: str, payload: dict) -> None:
     """add_document 时同步登记 BM25 索引（进程内）。"""
-    _chunk_store[chunk_id] = payload
-    _bm25_cache.pop(f"{COLLECTION}:all", None)
+    with _bm25_lock:
+        _chunk_store[chunk_id] = payload
+        _bm25_cache.pop(f"{COLLECTION}:all", None)
 
 
 def search(query: str, top_k: int = 5, domain: str | None = None) -> dict[str, Any]:

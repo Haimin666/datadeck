@@ -49,8 +49,8 @@ class TokenUsageMiddleware(AgentMiddleware[TokenUsageState]):
         return self._record(request, response)
 
     def _record(self, request: ModelRequest, response: ModelResponse) -> ModelResponse:
-        from langchain.agents.middleware.types import ExtendedModelResponse, ModelResponse as MR
-        from langgraph.types import Command as Cmd
+        from langchain.agents.middleware.types import ExtendedModelResponse
+        from langgraph.types import Command
 
         msgs = list(request.messages or [])
         llm_msgs = [m for m in msgs if _is_llm_visible(m)]
@@ -74,9 +74,9 @@ class TokenUsageMiddleware(AgentMiddleware[TokenUsageState]):
         if isinstance(response, ExtendedModelResponse):
             existing = dict(response.command.update) if response.command is not None else {}
             existing.update(update)
-            return ExtendedModelResponse(model_response=response.model_response, command=Cmd(update=existing))
+            return ExtendedModelResponse(model_response=response.model_response, command=Command(update=existing))
         # 普通 ModelResponse 不接受 command 参数；协议要求用 ExtendedModelResponse 包装
-        return ExtendedModelResponse(model_response=response, command=Cmd(update=update))
+        return ExtendedModelResponse(model_response=response, command=Command(update=update))
 
 
 # ── 小助手 ────────────────────────────────────────────────

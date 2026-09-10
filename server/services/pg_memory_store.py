@@ -15,7 +15,7 @@ from sqlalchemy import Column, DateTime, Index, Integer, String, Text, text as s
 
 from server.db import async_session_factory
 from server.models import Base
-from server.utils.datetime_utils import utc_now
+from server.utils.datetime_utils import utc_now_naive
 
 
 class AgentMemory(Base):
@@ -28,7 +28,7 @@ class AgentMemory(Base):
     run_id = Column(String(64), nullable=True)
     content = Column(Text, nullable=False)
     replaces = Column(String(128), nullable=True)  # 替换目标记忆 id（幂等覆盖）
-    created_at = Column(DateTime, default=utc_now, nullable=False)
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
 
 
 class PgMemoryStore:
@@ -52,12 +52,12 @@ class PgMemoryStore:
                 await db.execute(sa_text(
                     "UPDATE agent_memories SET content=:c, created_at=:now "
                     "WHERE uid=:uid AND CAST(id AS TEXT)=:rid"),
-                    {"c": content, "now": utc_now(), "uid": uid, "rid": replaces})
+                    {"c": content, "now": utc_now_naive(), "uid": uid, "rid": replaces})
             await db.execute(sa_text(
                 "INSERT INTO agent_memories (uid, thread_id, run_id, content, replaces, created_at) "
                 "VALUES (:uid, :tid, :rid, :c, :rep, :now)"),
                 {"uid": uid, "tid": thread_id, "rid": run_id, "c": content,
-                 "rep": replaces, "now": utc_now()})
+                 "rep": replaces, "now": utc_now_naive()})
             await db.commit()
         return {"ok": True}
 

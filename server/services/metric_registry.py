@@ -15,7 +15,7 @@ from sqlalchemy import Column, DateTime, Index, Integer, JSON, String, Text
 
 from server.db import async_session_factory
 from server.models import Base
-from server.utils.datetime_utils import utc_now
+from server.utils.datetime_utils import utc_now_naive
 
 
 class MetricRegistry(Base):
@@ -30,7 +30,7 @@ class MetricRegistry(Base):
     unit = Column(String(32), nullable=True)     # 单位
     owner = Column(String(64), nullable=True)    # 归属团队
     domain = Column(String(64), nullable=True)   # 业务域
-    created_at = Column(DateTime, default=utc_now, nullable=False)
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
 
 
 async def resolve_alias(name: str) -> str:

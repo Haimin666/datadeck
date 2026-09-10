@@ -53,14 +53,18 @@ async def metrics_components(current_user=Depends(get_required_user)):
 async def discovery():
     """运行时能力发现：前端 runtimeCapabilities store 消费。
 
-    datadeck 当前无知识库后端，knowledge 关闭（前端隐藏知识库入口）。
+    基础文本知识库已启用；高级解析能力不在当前版本范围内。
     """
     return {
         "service": settings.app_name,
         "version": "0.2.0",
         "capabilities": {
             "features": {
-                "knowledge": False,
+                "knowledge": True,
+                "skills": True,
+                "mcp": True,
+                "workspace": True,
+                "scheduled_tasks": True,
             },
         },
     }
@@ -72,7 +76,7 @@ async def info():
     return {
         "organization": {
             "name": "DataDeck",
-            "logo": "",
+            "logo": "/logo.png",
             "avatar": "",
         },
         "branding": {

@@ -116,7 +116,7 @@ def _create_thread_and_run(client: TestClient, query="你好") -> dict:
         json={"agent_id": "default-chatbot", "title": "测试对话"},
         headers=headers,
     )
-    thread_id = thread_res.json()["thread"]["id"]
+    thread_id = thread_res.json()["id"]
 
     run_res = client.post(
         "/api/agent/runs",
@@ -166,22 +166,38 @@ class TestSseEndToEnd:
         types = [ev["event"] for ev in events]
         assert types[0] == "init", f"首个事件应为 init: {types[:3]}"
         assert types[-1] == "end", f"末尾事件应为 end: {types[-3:]}"
-        assert "finished" in types
-        stream_events = [e for e in events if e["event"] == "stream_event"]
-        assert any(e["payload"].get("type") == "message_delta" for e in stream_events)
-        finished = [e for e in events if e["event"] == "finished"][-1]
-        assert finished["payload"]["run"]["status"] == "completed"
+        # 增量文本走 messages 事件的 payload.chunk.stream_event(message_delta)
+        message_events = [e for e in events if e["event"] == "messages"]
+        assert message_events, f"应有 messages 事件: {types}"
+        deltas = [
+            e["payload"]["chunk"]["stream_event"]
+            for e in message_events
+            if isinstance(e["payload"].get("chunk"), dict)
+            and isinstance(e["payload"]["chunk"].get("stream_event"), dict)
+            and e["payload"]["chunk"]["stream_event"].get("type") == "message_delta"
+        ]
+        assert deltas, "应有 message_delta stream_event"
+        end_events = [e for e in events if e["event"] == "end"]
+        assert end_events[-1]["payload"]["status"] == "completed"
 
     def test_message_delta_payload_contract(self, app_client):
         ctx = _create_thread_and_run(app_client)
         events = _drain_sse(app_client, ctx["run"]["id"], ctx["headers"])
-        deltas = [e["payload"] for e in events
-                  if e["event"] == "stream_event" and e["payload"].get("type") == "message_delta"]
+        deltas = [
+            e["payload"]["chunk"]
+            for e in events
+            if e["event"] == "messages"
+            and isinstance(e["payload"].get("chunk"), dict)
+            and isinstance(e["payload"]["chunk"].get("stream_event"), dict)
+            and e["payload"]["chunk"]["stream_event"].get("type") == "message_delta"
+        ]
         assert deltas
         for d in deltas:
-            # AgentChatComponent L293: const { type, delta } = payload; delta.content
-            assert "delta" in d and "content" in d["delta"]
-            assert d.get("message", {}).get("role") == "assistant"
+            # 前端 useAgentStreamHandler.streamEventToMessageChunk 契约:
+            # chunk.status='loading' + stream_event.{message_id,content}
+            assert d["status"] == "loading"
+            assert d["stream_event"]["message_id"]
+            assert isinstance(d["stream_event"]["content"], str)
 
     def test_run_status_transitions_to_completed(self, app_client):
         ctx = _create_thread_and_run(app_client)

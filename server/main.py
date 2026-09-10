@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
+import traceback
 
 import uvicorn
 from dotenv import load_dotenv
@@ -15,20 +16,13 @@ from fastapi.staticfiles import StaticFiles
 load_dotenv()
 
 from server.config import settings  # noqa: E402
+from datadeck import logger  # noqa: E402
 from server.db import engine, async_session_factory  # noqa: E402
-from server.models import Base, User, Agent  # noqa: E402
+from server.models import Agent, Base, User  # noqa: E402
 from server.routers import router  # noqa: E402
 from server.routers.run_router import run_router  # noqa: E402
 from server.utils.auth import hash_password  # noqa: E402
 from server.utils.datetime_utils import utc_now  # noqa: E402
-
-# 新表模型：导入即注册进 Base.metadata（lifespan create_all 自动建表）
-from server.services.eval_service import EvaluationCase, EvaluationRun  # noqa: F401,E402
-from server.services.pg_memory_store import AgentMemory  # noqa: F401,E402
-from server.services.metric_registry import MetricRegistry  # noqa: F401,E402
-from server.routers.config_router import SystemConfig, UserConfig  # noqa: F401,E402
-from server.services.attachment_service import ThreadAttachment  # noqa: F401,E402
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -64,9 +58,43 @@ async def lifespan(app: FastAPI):
             db.add(user)
             await db.commit()
 
+        from server.services.model_providers.service import (
+            ensure_builtin_model_providers_in_db,
+            get_all_model_providers,
+        )
+        await ensure_builtin_model_providers_in_db(db)
+        await db.commit()
+
+        try:
+            from server.services.model_providers.cache import model_cache
+            model_cache.rebuild(await get_all_model_providers(db))
+        except Exception as exc:
+            logger.warning(f"Redis model cache rebuild failed: {exc}")
+
+        from server.services.skills.service import init_builtin_skills
+        try:
+            await init_builtin_skills(db, created_by="system")
+        except Exception as exc:
+            logger.warning(f"Built-in skills initialization failed: {exc}")
+            traceback.print_exc()
+
+    try:
+        from server.services.mcp.service import ensure_builtin_mcp_servers_in_db
+        await ensure_builtin_mcp_servers_in_db()
+    except Exception as exc:
+        logger.warning(f"Built-in MCP servers initialization failed: {exc}")
+
+    from server.services.task_service import tasker
+    await tasker.start()
+    await tasker.start_scheduler()
+
     yield
 
     # 关闭：释放 agent checkpointer 连接池 + 销毁引擎
+    try:
+        await tasker.shutdown()
+    except Exception as exc:
+        logger.warning(f"Tasker shutdown failed: {exc}")
     from server.services.agents_provider import close_agent
     await close_agent()
     await engine.dispose()
@@ -108,8 +136,23 @@ if os.path.isdir(frontend_dist):
 
 # 用户上传文件（头像/图片）静态服务
 uploads_dir = os.path.join(os.path.dirname(__file__), "..", "uploads")
+legacy_uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
+if os.path.isdir(legacy_uploads_dir):
+    # 兼容早期版本写入 server/uploads 的头像和图片。
+    for upload_kind in ("avatars", "images"):
+        legacy_kind_dir = os.path.join(legacy_uploads_dir, upload_kind)
+        if os.path.isdir(legacy_kind_dir):
+            app.mount(
+                f"/uploads/{upload_kind}",
+                StaticFiles(directory=legacy_kind_dir),
+                name=f"legacy_uploads_{upload_kind}",
+            )
 if os.path.isdir(uploads_dir):
     app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
+
+# Vite public 资源（logo、登录背景等）需要在生产 API 进程中直接提供。
+if os.path.isdir(frontend_dist):
+    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
 
 
 @app.get("/")

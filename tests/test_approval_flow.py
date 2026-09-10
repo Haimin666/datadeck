@@ -73,7 +73,7 @@ class TestApprovalInterruptResume:
         headers = _login(app_client)
         th = app_client.post("/api/chat/thread",
                              json={"agent_id": "default-chatbot", "title": "审批测试"},
-                             headers=headers).json()["thread"]["id"]
+                             headers=headers).json()["id"]
         run = app_client.post("/api/agent/runs",
                               json={"query": "请调用 echo", "agent_slug": "default-chatbot",
                                     "thread_id": th},
@@ -83,13 +83,15 @@ class TestApprovalInterruptResume:
         final = _wait_status(app_client, run["id"], headers, {"interrupted"})
         assert final["status"] == "interrupted"
 
-        approvals = _db_events(run["id"], "human_approval_required")
-        assert approvals, "应有 human_approval_required 事件"
-        interrupt = approvals[-1]["interrupt"]
-        # 前端契约（AgentChatComponent L307-309 / toolApproval.js）
-        assert interrupt["tool_names"] == ["echo"]
-        assert interrupt["tool_calls"][0]["args"] == {"text": "危险操作"}
-        assert interrupt["actionRequests"][0]["name"] == "echo"
+        approvals = _db_events(run["id"], "interrupt")
+        assert approvals, "应有 interrupt(human_approval) 事件"
+        chunk = approvals[-1]["chunk"]
+        # 前端契约（useApproval.extractToolApprovalPayload: chunk.approval.{action_requests,review_configs}）
+        assert chunk["status"] == "human_approval_required"
+        assert chunk["approval"]["action_requests"][0]["name"] == "echo"
+        assert chunk["approval"]["action_requests"][0]["args"] == {"text": "危险操作"}
+        assert len(chunk["approval"]["review_configs"]) == len(chunk["approval"]["action_requests"])
+        assert chunk["tool_names"] == ["echo"]
 
         # 2. resume approve：同 run 恢复执行 → completed
         resume_res = app_client.post("/api/agent/runs",
@@ -114,7 +116,7 @@ class TestApprovalInterruptResume:
         headers = _login(app_client)
         th = app_client.post("/api/chat/thread",
                              json={"agent_id": "default-chatbot", "title": "拒绝测试"},
-                             headers=headers).json()["thread"]["id"]
+                             headers=headers).json()["id"]
         run = app_client.post("/api/agent/runs",
                               json={"query": "调用 echo", "agent_slug": "default-chatbot",
                                     "thread_id": th},
@@ -135,7 +137,7 @@ class TestApprovalInterruptResume:
         headers = _login(app_client)
         th = app_client.post("/api/chat/thread",
                              json={"agent_id": "default-chatbot", "title": "t"},
-                             headers=headers).json()["thread"]["id"]
+                             headers=headers).json()["id"]
         res = app_client.post("/api/agent/runs",
                               json={"query": "", "agent_slug": "default-chatbot",
                                     "thread_id": th, "resume": "not-a-run",
@@ -149,7 +151,7 @@ class TestApprovalInterruptResume:
         headers = _login(app_client)
         th = app_client.post("/api/chat/thread",
                              json={"agent_id": "default-chatbot", "title": "t"},
-                             headers=headers).json()["thread"]["id"]
+                             headers=headers).json()["id"]
         run = app_client.post("/api/agent/runs",
                               json={"query": "hi", "agent_slug": "default-chatbot",
                                     "thread_id": th},

@@ -11,13 +11,21 @@ from __future__ import annotations
 
 import os
 import ssl
+import asyncio
 import urllib.parse
 import urllib.request
+from collections.abc import Callable, Coroutine
 from typing import Any
 
-_ctx = ssl.create_default_context()
-_ctx.check_hostname = False
-_ctx.verify_mode = ssl.CERT_NONE
+def _ssl_context() -> ssl.SSLContext:
+    """默认校验证书；仅在明确配置时允许内网自签名证书。"""
+    verify = os.getenv("DATADECK_OMD_SSL_VERIFY", "true").strip().lower()
+    if verify in {"0", "false", "no", "off"}:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        return context
+    return ssl.create_default_context()
 
 
 def omd_base_url() -> str:
@@ -43,6 +51,15 @@ def omd_configured() -> bool:
     return bool(omd_base_url() and omd_token())
 
 
+def _run_async_query(factory: Callable[[], Coroutine[Any, Any, list]]) -> list | None:
+    """同步工具在已有事件循环中安全降级，避免嵌套 asyncio.run。"""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(factory())
+    return None
+
+
 def _placeholder(action: str) -> dict[str, Any]:
     return {
         "ok": False,
@@ -60,7 +77,7 @@ def _api_get(path: str, retries: int = 2) -> dict[str, Any] | None:
     import time
     for attempt in range(retries):
         try:
-            with urllib.request.urlopen(req, context=_ctx, timeout=30) as resp:
+            with urllib.request.urlopen(req, context=_ssl_context(), timeout=30) as resp:
                 import json
                 return json.loads(resp.read().decode("utf-8"))
         except Exception:
@@ -96,13 +113,8 @@ def _pg_fallback(action: str) -> dict[str, Any] | None:
     dsn = os.getenv("DATADECK_SQL_DSN", "")
     if not dsn or not dsn.startswith(("postgresql://", "postgres://")):
         return None
-    import asyncio
-
     try:
         import asyncpg
-
-        async def run(coro):
-            return await coro
 
         async def query(sql: str):
             conn = await asyncpg.connect(dsn.replace("postgresql://", "postgres://", 1))
@@ -112,9 +124,11 @@ def _pg_fallback(action: str) -> dict[str, Any] | None:
                 await conn.close()
 
         if action == "databases":
-            rows = asyncio.run(query(
+            rows = _run_async_query(lambda: query(
                 "SELECT schema_name AS name FROM information_schema.schemata "
                 "WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY 1"))
+            if rows is None:
+                return None
             return {"ok": True, "source": "pg_fallback",
                     "schemas": [{"name": r["name"], "fqn": r["name"]} for r in rows]}
         return None
@@ -192,8 +206,6 @@ def _pg_fallback_tables(schema: str) -> dict[str, Any] | None:
     if not dsn or not dsn.startswith(("postgresql://", "postgres://")):
         return None
     try:
-        import asyncio
-
         import asyncpg
 
         async def query():
@@ -207,7 +219,9 @@ def _pg_fallback_tables(schema: str) -> dict[str, Any] | None:
             finally:
                 await conn.close()
 
-        rows = asyncio.run(query())
+        rows = _run_async_query(query)
+        if rows is None:
+            return None
         return {
             "ok": True, "source": "pg_fallback", "schema": schema, "total": len(rows),
             "tables": [
@@ -226,8 +240,6 @@ def _pg_fallback_table_schema(schema: str, table: str) -> dict[str, Any] | None:
     if not dsn or not dsn.startswith(("postgresql://", "postgres://")):
         return None
     try:
-        import asyncio
-
         import asyncpg
 
         async def query():
@@ -243,7 +255,9 @@ def _pg_fallback_table_schema(schema: str, table: str) -> dict[str, Any] | None:
             finally:
                 await conn.close()
 
-        rows = asyncio.run(query())
+        rows = _run_async_query(query)
+        if rows is None:
+            return None
         if not rows:
             return {"ok": False, "business": True,
                     "error": f"表 {schema}.{table} 在数据源中不存在（information_schema 无此表）。"

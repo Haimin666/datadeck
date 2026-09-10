@@ -13,12 +13,12 @@ from datetime import datetime, timedelta
 from sqlalchemy import text as sa_text
 
 from server.db import async_session_factory
-from server.utils.datetime_utils import utc_now
+from server.utils.datetime_utils import utc_now_naive
 
 
 async def run_stats(hours: int = 24) -> dict:
     """近 N 小时运行统计。"""
-    since = utc_now() - timedelta(hours=hours)  # 传 datetime 对象（asyncpg 不收 str）
+    since = utc_now_naive() - timedelta(hours=hours)  # 传 naive datetime（DB 列 timestamp without time zone）
     async with async_session_factory() as db:
         r = await db.execute(sa_text("""
             SELECT
@@ -62,7 +62,7 @@ async def run_stats(hours: int = 24) -> dict:
 
 async def tool_stats(hours: int = 24) -> dict:
     """工具调用频次与错误分布（基于 stream_event.tool_call + error 事件）。"""
-    since = utc_now() - timedelta(hours=hours)  # 传 datetime 对象（asyncpg 不收 str）
+    since = utc_now_naive() - timedelta(hours=hours)  # 传 naive datetime（DB 列 timestamp without time zone）
     async with async_session_factory() as db:
         r = await db.execute(sa_text("""
             SELECT payload->'tool_call'->>'name' AS tool, COUNT(*) AS calls

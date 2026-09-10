@@ -10,6 +10,7 @@ from server.db import get_db
 from server.models import User, ApiKey
 from server.utils.auth import decode_access_token, derive_api_key_hash
 from server.config import settings
+from server.utils.datetime_utils import utc_now_naive
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token", auto_error=False)
 
@@ -36,8 +37,15 @@ async def get_required_user(
             if payload:
                 user_id = payload.get("sub")
                 if user_id:
-                    result = await db.execute(select(User).where(User.id == int(user_id), User.is_deleted == 0))
-                    user = result.scalar_one_or_none()
+                    try:
+                        numeric_user_id = int(user_id)
+                    except (TypeError, ValueError):
+                        numeric_user_id = None
+                    if numeric_user_id is not None:
+                        result = await db.execute(
+                            select(User).where(User.id == numeric_user_id, User.is_deleted == 0)
+                        )
+                        user = result.scalar_one_or_none()
 
     # 2. X-API-Key
     if user is None and x_api_key:
@@ -45,13 +53,22 @@ async def get_required_user(
         result = await db.execute(select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.revoked_at.is_(None)))
         api_key = result.scalar_one_or_none()
         if api_key:
-            result = await db.execute(select(User).where(User.id == api_key.uid, User.is_deleted == 0))
+            result = await db.execute(
+                select(User).where(User.uid == api_key.uid, User.is_deleted == 0)
+            )
             user = result.scalar_one_or_none()
             if user:
-                api_key.last_used_at = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+                api_key.last_used_at = utc_now_naive()
 
     if user is None:
         raise credentials_exception
+    return user
+
+
+async def get_admin_user(user: User = Depends(get_required_user)) -> User:
+    """Restrict access to admin and superadmin users."""
+    if user.role not in {"admin", "superadmin"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return user
 
 
@@ -68,5 +85,9 @@ async def get_optional_user(
     user_id = payload.get("sub")
     if not user_id:
         return None
-    result = await db.execute(select(User).where(User.id == int(user_id), User.is_deleted == 0))
+    try:
+        numeric_user_id = int(user_id)
+    except (TypeError, ValueError):
+        return None
+    result = await db.execute(select(User).where(User.id == numeric_user_id, User.is_deleted == 0))
     return result.scalar_one_or_none()

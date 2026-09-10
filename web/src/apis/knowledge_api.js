@@ -1,5 +1,12 @@
 import { apiGet, apiAdminGet, apiAdminPost, apiAdminPut, apiAdminDelete, apiRequest } from './base'
 
+export const scheduledTaskApi = {
+  list: () => apiAdminGet('/api/scheduled-tasks'),
+  create: (data) => apiAdminPost('/api/scheduled-tasks', data),
+  update: (id, data) => apiAdminPut(`/api/scheduled-tasks/${id}`, data),
+  remove: (id) => apiAdminDelete(`/api/scheduled-tasks/${id}`)
+}
+
 /**
  * 知识库管理API模块
  * 包含数据库管理、文档管理、查询接口等功能
@@ -102,6 +109,23 @@ export const databaseApi = {
   getAccessibleDatabases: async () => {
     return apiGet('/api/knowledge/databases/accessible')
   }
+}
+
+// 基础文本知识库 API（DataDeck 原生闭环）
+export const knowledgeBaseApi = {
+  list: () => apiAdminGet('/api/knowledge/databases'),
+  create: (data) => apiAdminPost('/api/knowledge/databases', data),
+  detail: (kbId) => apiAdminGet(`/api/knowledge/databases/${kbId}`),
+  remove: (kbId) => apiAdminDelete(`/api/knowledge/databases/${kbId}`),
+  documents: (kbId) => apiAdminGet(`/api/knowledge/databases/${kbId}/documents`),
+  upload: (kbId, file) => {
+    const form = new FormData()
+    form.append('file', file)
+    return apiAdminPost(`/api/knowledge/databases/${kbId}/documents/upload`, form)
+  },
+  removeDocument: (kbId, documentId) =>
+    apiAdminDelete(`/api/knowledge/databases/${kbId}/documents/${documentId}`),
+  query: (kbId, data) => apiAdminPost(`/api/knowledge/databases/${kbId}/query`, data)
 }
 
 // =============================================================================

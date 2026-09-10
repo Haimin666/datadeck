@@ -13,34 +13,81 @@ import uuid as _uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import Column, DateTime, Integer, String, Text, text as sa_text
+from sqlalchemy import text as sa_text
 
 from server.db import async_session_factory, get_db
 from server.deps import get_required_user
-from server.models import Base, User
-from server.utils.datetime_utils import utc_now
+from server.models import SystemConfig, User, UserConfig
+from server.utils.datetime_utils import utc_now_naive
 
 config_router = APIRouter(tags=["config"])
-
-
-class SystemConfig(Base):
-    __tablename__ = "system_configs"
-    key = Column(String(128), primary_key=True)
-    value = Column(Text, nullable=False)
-    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
-
-
-class UserConfig(Base):
-    __tablename__ = "user_configs"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    uid = Column(String(64), nullable=False, index=True, unique=True)
-    config_json = Column(Text, nullable=False, default="{}")  # JSON 字符串
-    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
 
 
 def _require_admin(user: User) -> None:
     if user.role not in ("admin", "superadmin"):
         raise HTTPException(status_code=403, detail="需要管理员权限")
+
+
+_CONFIG_OPTION_DEFINITIONS = {
+    "remote_skill_source_policy": {
+        "name": "远程 Skill 来源",
+        "description": "限制远程加载和安装 Skill 的域名。",
+        "params": {
+            "fields": [{
+                "key": "allowed_hosts",
+                "label": "允许的域名",
+                "default": [],
+                "environment": "DATADECK_SKILL_ALLOWED_HOSTS",
+            }]
+        },
+    }
+}
+
+
+def _config_option(key: str, value=None) -> dict:
+    definition = _CONFIG_OPTION_DEFINITIONS[key]
+    return {
+        "key": key,
+        **definition,
+        "value": value if isinstance(value, dict) else {},
+        "sensitive_state": {},
+    }
+
+
+@config_router.get("/system/config/options")
+async def get_config_options(
+    current_user: User = Depends(get_required_user),
+    db=Depends(get_db),
+):
+    """返回前端设置页使用的结构化配置项。"""
+    _require_admin(current_user)
+    result = await db.execute(sa_text(
+        "SELECT key, value FROM system_configs WHERE key = :key"
+    ), {"key": "remote_skill_source_policy"})
+    values = {key: _auto_parse(value) for key, value in result.fetchall()}
+    return {"options": [_config_option(key, values.get(key))
+                        for key in _CONFIG_OPTION_DEFINITIONS]}
+
+
+@config_router.put("/system/config/options/{key}")
+async def update_config_option(
+    key: str,
+    body: dict,
+    current_user: User = Depends(get_required_user),
+    db=Depends(get_db),
+):
+    _require_admin(current_user)
+    if key not in _CONFIG_OPTION_DEFINITIONS:
+        raise HTTPException(status_code=404, detail="配置项不存在")
+    value = body.get("value") or {}
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=422, detail="配置项值必须是对象")
+    await db.execute(sa_text("""
+        INSERT INTO system_configs (key, value, updated_at) VALUES (:k, :v, :now)
+        ON CONFLICT (key) DO UPDATE SET value=:v, updated_at=:now
+    """), {"k": key, "v": _dump(value), "now": utc_now_naive()})
+    await db.commit()
+    return {"option": _config_option(key, value)}
 
 
 # ── 系统配置 ──────────────────────────────────────────────
@@ -68,7 +115,7 @@ async def update_system_config(
     await db.execute(sa_text("""
         INSERT INTO system_configs (key, value, updated_at) VALUES (:k, :v, :now)
         ON CONFLICT (key) DO UPDATE SET value=:v, updated_at=:now
-    """), {"k": key, "v": _dump(value), "now": utc_now()})
+    """), {"k": key, "v": _dump(value), "now": utc_now_naive()})
     await db.commit()
     return {"ok": True}
 
@@ -85,7 +132,7 @@ async def update_system_config_batch(
         await db.execute(sa_text("""
             INSERT INTO system_configs (key, value, updated_at) VALUES (:k, :v, :now)
             ON CONFLICT (key) DO UPDATE SET value=:v, updated_at=:now
-        """), {"k": key, "v": _dump(value), "now": utc_now()})
+        """), {"k": key, "v": _dump(value), "now": utc_now_naive()})
     await db.commit()
     r = await db.execute(sa_text("SELECT key, value FROM system_configs"))
     return {k: _auto_parse(v) for k, v in r.fetchall()}
@@ -171,7 +218,7 @@ async def _set_user_config_json(uid: str, cfg: dict) -> None:
         await db.execute(sa_text("""
             INSERT INTO user_configs (uid, config_json, updated_at) VALUES (:u, :c, :now)
             ON CONFLICT (uid) DO UPDATE SET config_json=:c, updated_at=:now
-        """), {"u": uid, "c": json.dumps(cfg, ensure_ascii=False), "now": utc_now()})
+        """), {"u": uid, "c": json.dumps(cfg, ensure_ascii=False), "now": utc_now_naive()})
         await db.commit()
 
 
@@ -225,7 +272,8 @@ async def upload_user_image(
     data = await file.read()
     if len(data) > 10 * 1024 * 1024:
         raise HTTPException(status_code=422, detail="图片不能超过 10MB")
-    upload_dir = os.path.join(os.path.dirname(__file__), "..", "uploads", "images")
+    # 图片使用独立目录，由 main.py 以 /uploads/images 提供静态访问。
+    upload_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads", "images"))
     os.makedirs(upload_dir, exist_ok=True)
     name = f"{_uuid.uuid4().hex}{ext}"
     with open(os.path.join(upload_dir, name), "wb") as f:

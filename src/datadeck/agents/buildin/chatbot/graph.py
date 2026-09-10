@@ -1,7 +1,7 @@
 """ChatBot 智能体：核心环组装（自 Yuxi agents/buildin/chatbot/graph.py 抽离）。
 
 保留：create_agent + middleware 链（summary/memory/todo/model retry/token/steer/approval）。
-去掉：sandbox/filesystem/knowledge/subagent/skills/image 门控中间件与平台 backend。
+去掉：sandbox/knowledge/subagent/skills/image 门控中间件与平台 backend。
 summary 使用 langchain 公开 SummarizationMiddleware（无需专用 backend）。
 """
 
@@ -70,7 +70,7 @@ async def _build_middlewares(context: BaseContext, *, model, memory_store: Memor
 class ChatbotAgent(BaseAgent):
     name = "datadeck 助手"
     description = "基础的对话机器人，可回答问题，可在配置中启用需要的工具。"
-    capabilities = []
+    capabilities = ["workspace_files"]
     context_schema = ChatBotContext
 
     def __init__(self, *, model_provider, memory_store: MemoryStore | None = None,
@@ -78,10 +78,15 @@ class ChatbotAgent(BaseAgent):
         super().__init__(checkpointer_provider=checkpointer_provider, **kwargs)
         self._model_provider = model_provider
         self._memory_store = memory_store
+        self._context_skills_resolver = kwargs.get("context_skills_resolver")
+        self._extra_middlewares = kwargs.get("extra_middlewares")
 
     async def get_graph(self, context=None, **kwargs):
         context = context or self.context_schema()
-        await sync_agent_context_skills(context)
+        if self._context_skills_resolver is not None:
+            await self._context_skills_resolver(context)
+        else:
+            await sync_agent_context_skills(context)
         model_spec = getattr(context, "model", "") or ""
         if not model_spec:
             model_spec = default_model_spec(self._model_provider)
@@ -90,6 +95,8 @@ class ChatbotAgent(BaseAgent):
 
         middlewares = await _build_middlewares(
             context, model=model, memory_store=self._memory_store)
+        if self._extra_middlewares is not None:
+            middlewares.extend(await self._extra_middlewares(context))
 
         tools = await resolve_configured_runtime_tools(context)
         system_prompt = build_prompt_with_context(context)

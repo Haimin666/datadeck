@@ -2,16 +2,19 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
 from sqlalchemy import select as sa_select, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.db import get_db
 from server.deps import get_required_user
-from server.models import User, Thread, AgentRun, Agent, RunEvent, MessageFeedback
+from server.models import User, Thread, AgentRun, Agent, RunEvent, MessageFeedback, Project
+from server.services.project_service import create_implicit_project
+from server.utils.datetime_utils import utc_now_naive
+from datadeck import logger
 
 chat = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -25,10 +28,10 @@ class SimpleCallRequest(BaseModel):
 async def simple_call(body: SimpleCallRequest, current_user: User = Depends(get_required_user)):
     """非流式简单调用，用于标题生成等场景（无线程上下文，一次性调用）。"""
     from datadeck.agents.buildin.chatbot.graph import ChatbotAgent
-    from datadeck.adapters.model_provider import EnvModelProvider
+    from datadeck.adapters.platform_model_provider import PlatformModelProvider
     from datadeck.adapters.checkpointer import MemoryCheckpointerProvider
 
-    provider = EnvModelProvider()
+    provider = PlatformModelProvider()
     agent = ChatbotAgent(
         model_provider=provider,
         checkpointer_provider=MemoryCheckpointerProvider(),
@@ -47,6 +50,14 @@ class ThreadCreateRequest(BaseModel):
     agent_id: str
     title: str | None = None
     metadata: dict = {}
+    project_id: str | None = None
+
+
+class ThreadUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=255)
+    is_pinned: bool | None = None
+    tool_approval_mode: Literal["default", "always_trust", "none"] | None = None
+    metadata: dict | None = None
 
 
 @chat.post("/thread")
@@ -55,12 +66,42 @@ async def create_thread(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
+    project = None
+    if body.project_id:
+        project = await db.scalar(
+            sa_select(Project).where(
+                Project.id == body.project_id,
+                Project.uid == current_user.uid,
+                Project.status == "active",
+            )
+        )
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project 不存在")
+    else:
+        project = await create_implicit_project(uid=current_user.uid, db=db)
+
     thread_id = str(uuid.uuid4())
-    t = Thread(id=thread_id, uid=current_user.uid, agent_id=body.agent_id, title=body.title or "新的对话")
+    t = Thread(
+        id=thread_id,
+        uid=current_user.uid,
+        agent_id=body.agent_id,
+        title=body.title or "新的对话",
+        project_id=project.id,
+        extra_metadata=body.metadata or {},
+    )
     db.add(t)
     await db.commit()
+    if project.directory_mode == "managed":
+        # 主动物化会话 Workdir（供后续 workspace/project 功能）。目录不可写/暂不可用
+        # 不应阻断会话创建——真正使用该 Workdir 的路径会再次尝试并显式报错。
+        try:
+            from server.workspace.paths import ensure_bound_user_workdir
+
+            ensure_bound_user_workdir(current_user.uid, project.workdir_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"create_thread: 会话 Workdir 物化失败（不影响对话）: {exc}")
     await db.refresh(t)
-    return {"thread": t.to_dict()}
+    return t.to_dict()
 
 
 @chat.get("/threads")
@@ -71,7 +112,7 @@ async def list_threads(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    conds = [Thread.uid == current_user.uid]
+    conds = [Thread.uid == current_user.uid, Thread.status == "active"]
     if agent_id:
         conds.append(Thread.agent_id == agent_id)
     r = await db.execute(
@@ -82,7 +123,7 @@ async def list_threads(
         .offset(offset)
     )
     threads = r.scalars().all()
-    return {"threads": [t.to_dict() for t in threads]}
+    return [t.to_dict() for t in threads]
 
 
 @chat.get("/threads/search")
@@ -96,19 +137,24 @@ async def search_threads(
     pattern = f"%{q}%"
     r = await db.execute(
         sa_select(Thread)
-        .where(Thread.uid == current_user.uid, Thread.title.ilike(pattern))
+        .where(Thread.uid == current_user.uid, Thread.status == "active", Thread.title.ilike(pattern))
         .order_by(Thread.updated_at.desc())
         .limit(limit)
         .offset(offset)
     )
     threads = r.scalars().all()
-    return {"threads": [t.to_dict() for t in threads]}
+    return {
+        "items": [t.to_dict() for t in threads],
+        "has_more": len(threads) == limit,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @chat.put("/thread/{thread_id}")
 async def update_thread(
     thread_id: str,
-    body: dict,
+    body: ThreadUpdateRequest,
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -116,18 +162,17 @@ async def update_thread(
     t = r.scalar_one_or_none()
     if not t:
         raise HTTPException(status_code=404, detail="对话不存在")
-    if body.get("title") is not None:
-        t.title = body["title"]
-    if "is_pinned" in body:
-        t.is_pinned = body["is_pinned"]
-    if body.get("tool_approval_mode") is not None:
-        mode = str(body["tool_approval_mode"])
-        if mode not in ("default", "always_trust", "none"):
-            raise HTTPException(status_code=422, detail="tool_approval_mode 取值须为 default/always_trust/none")
-        t.tool_approval_mode = mode
+    if body.title is not None:
+        t.title = body.title
+    if "is_pinned" in body.model_fields_set and body.is_pinned is not None:
+        t.is_pinned = body.is_pinned
+    if body.tool_approval_mode is not None:
+        t.tool_approval_mode = body.tool_approval_mode
+    if body.metadata is not None:
+        t.extra_metadata = body.metadata
     await db.commit()
     await db.refresh(t)
-    return {"thread": t.to_dict()}
+    return t.to_dict()
 
 
 @chat.post("/thread/{thread_id}/viewed")
@@ -140,9 +185,9 @@ async def mark_thread_viewed(
     t = r.scalar_one_or_none()
     if not t:
         raise HTTPException(status_code=404, detail="对话不存在")
-    t.viewed_at = datetime.utcnow()
+    t.viewed_at = utc_now_naive()
     await db.commit()
-    return {"thread": t.to_dict()}
+    return t.to_dict()
 
 
 @chat.delete("/thread/{thread_id}")
@@ -155,6 +200,15 @@ async def delete_thread(
     t = r.scalar_one_or_none()
     if not t:
         raise HTTPException(status_code=404, detail="对话不存在")
+    # 兼容旧数据库：message_feedbacks 可能尚未完成迁移，不能因此阻断线程删除。
+    feedback_table = await db.execute(sa_text(
+        "SELECT to_regclass('public.message_feedbacks')"
+    ))
+    if feedback_table.scalar_one_or_none() is not None:
+        await db.execute(sa_text(
+            "DELETE FROM message_feedbacks WHERE run_id IN ("
+            "SELECT id FROM agent_runs WHERE thread_id=:tid)"
+        ), {"tid": thread_id})
     await db.execute(sa_text("DELETE FROM run_events WHERE thread_id=:tid"), {"tid": thread_id})
     await db.execute(sa_text("DELETE FROM agent_runs WHERE thread_id=:tid"), {"tid": thread_id})
     await db.delete(t)
@@ -170,12 +224,15 @@ async def get_thread_history(
 ):
     """历史消息：读 checkpointer 真实状态（DEVELOPMENT.md M1：history 零自研）。
 
+    契约对齐 1:1 迁移的 Yuxi 前端（fetchThreadMessages 读 response.history，
+    条目按 type='human'|'ai' 分组渲染）。同时保留 messages/last_seq 兼容旧调用。
+
     thread 查不到（含他人 thread）静默返回空——不 4xx 打断前端（§2.6 坑③）。
     """
     r = await db.execute(sa_select(Thread).where(Thread.id == thread_id, Thread.uid == current_user.uid))
     t = r.scalar_one_or_none()
     if not t:
-        return {"messages": [], "last_seq": "0-0"}
+        return {"history": [], "messages": [], "last_seq": "0-0"}
 
     from server.services.agents_provider import get_chatbot_agent
     agent = await get_chatbot_agent()
@@ -191,10 +248,11 @@ async def get_thread_history(
             continue
         entry = {
             "id": m.get("id") or str(uuid.uuid4()),
+            "type": msg_type,  # 前端 convertServerHistoryToMessages 按 human/ai 分组
             "role": "user" if msg_type == "human" else "assistant",
             "content": m.get("content") or "",
             "tool_calls": m.get("tool_calls") or [],
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": utc_now_naive().isoformat(),
         }
         messages.append(entry)
 
@@ -207,7 +265,7 @@ async def get_thread_history(
     if seq:
         last_seq = str(seq)
 
-    return {"messages": messages, "last_seq": last_seq}
+    return {"history": messages, "messages": messages, "last_seq": last_seq}
 
 
 @chat.get("/thread/{thread_id}/state")
@@ -245,10 +303,16 @@ async def get_thread_state(
 
 
 async def _get_active_run(thread_id: str, uid: str, db: AsyncSession):
+    """线程当前仍需前端关注的最近一个 run（含 interrupted，供中断恢复）。
+
+    契约对齐 Yuxi get_active_run_by_thread：pending/running/cancel_requested/interrupted
+    视为 active，其余（终态）返回 run=None。
+    """
     r = await db.execute(
         sa_text(
             "SELECT id, status, agent_slug, created_at FROM agent_runs "
-            "WHERE thread_id=:tid AND uid=:uid AND status NOT IN ('completed','failed','cancelled','interrupted') "
+            "WHERE thread_id=:tid AND uid=:uid "
+            "AND status IN ('pending','running','cancel_requested','interrupted') "
             "ORDER BY created_at DESC LIMIT 1"
         ),
         {"tid": thread_id, "uid": uid},

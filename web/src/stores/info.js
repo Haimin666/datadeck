@@ -88,10 +88,11 @@ export const useInfoStore = defineStore('info', () => {
       isLoading.value = true
       const response = await brandApi.getInfoConfig()
 
-      if (response.success && response.data) {
-        setInfoConfig(response.data)
-        console.debug('信息配置加载成功:', response.data)
-        return response.data
+      const payload = response?.data || response
+      if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        setInfoConfig(payload)
+        console.debug('信息配置加载成功:', payload)
+        return payload
       } else {
         console.warn('信息配置加载失败，使用默认配置')
         return null

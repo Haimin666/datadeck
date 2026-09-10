@@ -15,10 +15,10 @@ test('模型选择按当前选择、Conversation、智能体默认的顺序解�
 
   assert.ok(
     modelBlock.indexOf('selectedModelByThread') <
-      modelBlock.indexOf('currentThread.value?.metadata?.model_spec')
+      modelBlock.indexOf('(currentThread.value?.metadata || currentThread.value?.extra_metadata)?.model_spec')
   )
   assert.ok(
-    modelBlock.indexOf('currentThread.value?.metadata?.model_spec') <
+    modelBlock.indexOf('(currentThread.value?.metadata || currentThread.value?.extra_metadata)?.model_spec') <
       modelBlock.indexOf('agentDefaultModel.value')
   )
 })
