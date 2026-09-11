@@ -1,7 +1,6 @@
 """认证路由：登录、初始化管理员、/me、用户管理 CRUD。"""
 from __future__ import annotations
 
-import os
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -21,13 +20,6 @@ from server.config import settings
 func_count = sa_func.count
 
 auth = APIRouter(prefix="/auth", tags=["authentication"])
-
-
-@auth.get("/oidc/config")
-async def get_oidc_config():
-    """返回 OIDC 能力状态；未配置时返回 disabled，避免前端探测 404。"""
-    enabled = os.getenv("OIDC_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
-    return {"enabled": enabled, "provider_name": "OIDC" if enabled else ""}
 
 
 class TokenResponse(BaseModel):

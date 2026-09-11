@@ -13,24 +13,6 @@ import {
 } from './base'
 
 /**
- * 获取 OIDC 配置
- * @returns {Promise<{enabled: boolean, provider_name?: string}>}
- */
-async function getOIDCConfig() {
-  return apiGet('/api/auth/oidc/config', {}, false)
-}
-
-/**
- * 获取 OIDC 登录 URL
- * @param {string} redirectPath - 登录后的重定向路径
- * @returns {Promise<{login_url: string}>}
- */
-async function getOIDCLoginUrl(redirectPath = '/') {
-  const params = new URLSearchParams({ redirect_path: redirectPath })
-  return apiGet(`/api/auth/oidc/login-url?${params}`, {}, false)
-}
-
-/**
  * 使用一次性 code 交换 OIDC 登录结果
  * @param {string} code - 一次性登录 code
  * @returns {Promise<{
@@ -48,10 +30,6 @@ async function getOIDCLoginUrl(redirectPath = '/') {
  */
 async function getUserAccessOptions() {
   return apiAdminGet('/api/auth/users/access-options')
-}
-
-async function exchangeOIDCCode(code) {
-  return apiPost('/api/auth/oidc/exchange-code', { code }, {}, false)
 }
 
 async function login(credentials) {
@@ -145,10 +123,7 @@ export const authApi = {
   updateProfile,
   checkUid,
   impersonateUser,
-  getOIDCConfig,
-  getOIDCLoginUrl,
   getUserAccessOptions,
-  exchangeOIDCCode,
   getCLIAuthSession,
   approveCLIAuthSession
 }
