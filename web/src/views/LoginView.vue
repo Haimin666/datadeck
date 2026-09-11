@@ -267,7 +267,7 @@ import {
   Key as KeyIcon,
   AlertCircle as ExclamationCircleIcon
 } from '@lucide/vue'
-import { sanitizeRedirect } from '@/utils/oidcAutoStart'
+import { sanitizeRedirect } from '@/utils/redirect'
 import { MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 
 const router = useRouter()

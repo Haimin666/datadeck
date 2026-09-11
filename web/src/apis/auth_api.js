@@ -12,22 +12,6 @@ import {
   apiSuperAdminPost
 } from './base'
 
-/**
- * 使用一次性 code 交换 OIDC 登录结果
- * @param {string} code - 一次性登录 code
- * @returns {Promise<{
- *   access_token: string,
- *   token_type: string,
- *   user_id: number,
- *   username: string,
- *   uid: string,
- *   phone_number: string | null,
- *   avatar: string | null,
- *   role: string,
- *   department_id: number | null,
- *   department_name: string | null
- * }>}
- */
 async function getUserAccessOptions() {
   return apiAdminGet('/api/auth/users/access-options')
 }
