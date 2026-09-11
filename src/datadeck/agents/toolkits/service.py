@@ -6,7 +6,6 @@ MCP/Skill 依赖工具的自动注册由宿主经 middleware 扩展。
 
 from __future__ import annotations
 
-from pathlib import Path
 from threading import RLock
 from typing import Any
 
@@ -19,6 +18,19 @@ _WORKSPACE_TOOL_METADATA = [
     {"slug": "workspace_search_files", "name": "搜索项目文件", "description": "在当前项目工作目录内按文件名搜索文件。"},
     {"slug": "workspace_read_file", "name": "读取项目文件", "description": "读取当前项目工作目录内的 UTF-8 文本文件。"},
     {"slug": "workspace_write_file", "name": "写入项目文件", "description": "写入当前项目工作目录内的文本文件。"},
+]
+_PLATFORM_TOOL_METADATA = [
+    {"slug": "read_file", "name": "读取 Skill 文件", "description": "读取当前用户已授权 Skill 的文本文件。"},
+    {"slug": "scheduled_task_list", "name": "查看定时任务", "description": "列出当前用户的定时任务。"},
+    {"slug": "scheduled_task_create", "name": "创建定时任务", "description": "创建定时执行的 Agent 任务，仅在用户明确要求时调用。"},
+    {"slug": "scheduled_task_update", "name": "修改定时任务", "description": "修改当前用户的定时任务，仅在用户明确要求时调用。"},
+    {"slug": "scheduled_task_delete", "name": "删除定时任务", "description": "删除当前用户的定时任务，仅在用户明确要求时调用。"},
+    {"slug": "subagent_start", "name": "启动子智能体", "description": "启动一个已配置的子智能体执行独立任务。"},
+    {"slug": "subagent_status", "name": "查询子智能体", "description": "查询子智能体运行状态。"},
+    {"slug": "subagent_events", "name": "读取子智能体事件", "description": "读取子智能体的结构化运行事件。"},
+    {"slug": "subagent_cancel", "name": "取消子智能体", "description": "取消一个正在运行的子智能体。"},
+    {"slug": "subagent_await", "name": "等待子智能体", "description": "等待子智能体完成并返回结果。"},
+    {"slug": "subagent_orchestrate", "name": "编排子智能体", "description": "按依赖关系并行编排多个子智能体并汇总结果。"},
 ]
 
 
@@ -76,6 +88,11 @@ def get_tool_metadata(category: str | None = None) -> list[dict]:
         result = list(_metadata_cache)
     if not any(item["slug"] == _WORKSPACE_TOOL_METADATA[0]["slug"] for item in result):
         result.extend({**item, "category": "filesystem", "tags": [], "args": []} for item in _WORKSPACE_TOOL_METADATA)
+    known_slugs = {item["slug"] for item in result}
+    result.extend(
+        {**item, "category": "platform", "tags": ["平台能力"], "args": []}
+        for item in _PLATFORM_TOOL_METADATA if item["slug"] not in known_slugs
+    )
     if category:
         return [tool for tool in result if tool.get("category") == category]
     return result
@@ -110,6 +127,11 @@ def get_tool_instances_for_context(context) -> list[Any]:
     selected = getattr(context, "tools", None)
     if selected is None:
         return list(buildin_tools.values())
+    if (getattr(context, "knowledge_base_collection", None)
+            or getattr(context, "knowledge_base_id", None)
+            or getattr(context, "knowledges", None)) and "rag_search" in buildin_tools:
+        # 选择了知识库就必须具备检索入口，避免前端保存的工具白名单把 RAG 静默排除。
+        selected = [*selected, "rag_search"]
     tools: list[Any] = []
     seen: set[str] = set()
     for name in selected:

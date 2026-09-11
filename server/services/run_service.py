@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 
 from langgraph.types import Command
@@ -17,12 +18,63 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.db import async_session_factory
 from server.event_translator import append_event, consume_graph_stream
 from server.models import AgentRun
-from server.services.agents_provider import get_chatbot_agent
+from server.services.agents_provider import get_agent, get_chatbot_agent
 from server.utils.datetime_utils import utc_now_naive
 from datadeck import logger
 
 # 进程内运行注册表：run_id → asyncio.Task
 _running: dict[str, asyncio.Task] = {}
+
+
+def _agent_run_timeout_seconds() -> float:
+    """限制单次 Agent 图执行时长，避免后台任务永久占用并让前端无限等待。"""
+    try:
+        value = float(os.getenv("DATADECK_AGENT_RUN_TIMEOUT", "180"))
+    except (TypeError, ValueError):
+        value = 180.0
+    return max(value, 1.0)
+
+
+async def recover_orphaned_agent_runs() -> int:
+    """服务重启后收敛失去后台 task 的运行记录，避免前端永久等待。"""
+    async with async_session_factory() as db:
+        result = await db.execute(sa_text(
+            "UPDATE agent_runs SET status='failed', error_type='ServiceRestart', "
+            "error_message='服务重启导致 Agent 运行中断', finished_at=:now "
+            "WHERE status IN ('running','cancel_requested')"
+        ), {"now": utc_now_naive()})
+        await db.commit()
+        return int(result.rowcount or 0)
+
+
+async def resume_pending_agent_runs() -> int:
+    """服务启动后恢复每个线程队首的 pending run。
+
+    pending 表示尚未开始执行的排队请求，不能在重启时标记失败；同一线程
+    仍然遵循串行规则，存在审批中断时也必须等待用户恢复。
+    """
+    async with async_session_factory() as db:
+        result = await db.execute(sa_text(
+            "SELECT p.id FROM agent_runs p "
+            "WHERE p.status='pending' "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM agent_runs active "
+            "  WHERE active.thread_id=p.thread_id AND active.uid=p.uid "
+            "    AND active.status IN ('running','cancel_requested','interrupted')"
+            ") "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM agent_runs earlier "
+            "  WHERE earlier.thread_id=p.thread_id AND earlier.uid=p.uid "
+            "    AND earlier.status='pending' "
+            "    AND (earlier.created_at < p.created_at "
+            "      OR (earlier.created_at = p.created_at AND earlier.id < p.id))"
+            ") "
+            "ORDER BY p.created_at ASC"
+        ))
+        run_ids = [row[0] for row in result.fetchall()]
+    for run_id in run_ids:
+        await dispatch_run(run_id)
+    return len(run_ids)
 
 
 async def _get_user_domain(uid: str) -> str:
@@ -112,7 +164,7 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
         async with async_session_factory() as db:
             r = await db.execute(sa_text(
                 "SELECT r.thread_id, r.uid, r.input_payload, r.request_id, "
-                "t.tool_approval_mode, p.workdir_path, a.config_json "
+                "t.tool_approval_mode, p.workdir_path, a.backend_id, a.config_json "
                 "FROM agent_runs r "
                 "JOIN threads t ON t.id=r.thread_id AND t.uid=r.uid "
                 "JOIN agents a ON a.slug=r.agent_slug "
@@ -121,9 +173,21 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
             ), {"rid": run_id})
             row = r.fetchone()
         if not row:
+            async with async_session_factory() as db:
+                await db.execute(sa_text(
+                    "UPDATE agent_runs SET status='failed', error_type='RunNotFound', "
+                    "error_message='Agent 运行上下文不存在', finished_at=:now "
+                    "WHERE id=:rid AND status NOT IN ('completed','failed','cancelled')"
+                ), {"now": utc_now_naive(), "rid": run_id})
+                await db.commit()
+            await append_event(run_id, "error", {
+                "error": {"message": "Agent 运行上下文不存在", "type": "RunNotFound"},
+            })
+            await append_event(run_id, "end", {"run": {"id": run_id, "status": "failed"}})
             return
         (thread_id, uid, input_payload, request_id, tool_approval_mode,
-         workdir_path, agent_config) = row
+         workdir_path, agent_backend_id, agent_config) = row
+        agent_slug = str((input_payload or {}).get("agent_slug") or "default-chatbot")
         query = (input_payload or {}).get("query", "")
         image_content = (input_payload or {}).get("image_content")
         model_spec = (input_payload or {}).get("model_spec") or ""
@@ -135,7 +199,11 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
         if hint:
             query = f"[路由提示] {hint}\n\n{query}"
 
-        agent = await get_chatbot_agent()
+        if agent_slug == "data-agent" or agent_backend_id == "DataAgent":
+            agent = await get_agent(agent_slug, agent_backend_id)
+        else:
+            # 保留通用 Agent 的原注入入口，兼容现有测试和宿主扩展。
+            agent = await get_chatbot_agent()
         context = agent.context_schema()
         configured_context = (agent_config or {}).get("context", agent_config or {})
         if isinstance(configured_context, dict):
@@ -146,9 +214,46 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
             "run_id": run_id,
             "request_id": request_id,
             "model": model_spec or context.model,
+            "agent_backend_id": agent_backend_id,
         })
+        run_meta = (input_payload or {}).get("meta") or {}
+        if isinstance(run_meta, dict):
+            try:
+                context.subagent_depth = max(0, int(run_meta.get("subagent_depth", 0)))
+            except (TypeError, ValueError):
+                context.subagent_depth = 0
         context.tool_approval_mode = tool_approval_mode or "default"
         context.workdir_path = workdir_path
+        configured_kb_id = getattr(context, "knowledge_base_id", None)
+        if not configured_kb_id:
+            # 前端使用 knowledges 资源配置；当前基础 RAG 一次运行只检索一个知识库，取首个选择项。
+            configured_knowledges = getattr(context, "knowledges", None)
+            if isinstance(configured_knowledges, (list, tuple)) and configured_knowledges:
+                configured_kb_id = configured_knowledges[0]
+        if configured_kb_id:
+            # 只按当前用户解析知识库，禁止通过 agent 配置越权指定 collection。
+            async with async_session_factory() as kb_db:
+                kb_row = await kb_db.execute(sa_text(
+                    "SELECT collection_name FROM knowledge_bases "
+                    "WHERE id=:kb_id AND uid=:uid LIMIT 1"
+                ), {"kb_id": str(configured_kb_id), "uid": uid})
+                kb = kb_row.fetchone()
+            if kb:
+                context.knowledge_base_collection = kb[0]
+            else:
+                context.knowledge_base_id = None
+                context.knowledge_base_collection = None
+        if not getattr(context, "knowledge_base_collection", None):
+            # 未显式绑定时使用当前用户最近更新的知识库，保证知识库上传后可直接被 Agent 检索。
+            async with async_session_factory() as kb_db:
+                kb_row = await kb_db.execute(sa_text(
+                    "SELECT id, collection_name FROM knowledge_bases "
+                    "WHERE uid=:uid ORDER BY updated_at DESC NULLS LAST, created_at DESC LIMIT 1"
+                ), {"uid": uid})
+                kb = kb_row.fetchone()
+            if kb:
+                context.knowledge_base_id = kb[0]
+                context.knowledge_base_collection = kb[1]
         if workdir_path:
             from server.services.workdir_service import resolve_authorized_workdir
 
@@ -157,7 +262,14 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
             )).workdir
         graph = await agent.get_graph(context=context)
         logger.info(f"run {run_id} graph ready")
-        config = {"configurable": {"thread_id": thread_id, "uid": uid}}
+        try:
+            max_execution_steps = int(getattr(context, "max_execution_steps", 300))
+        except (TypeError, ValueError):
+            max_execution_steps = 300
+        config = {
+            "configurable": {"thread_id": thread_id, "uid": uid},
+            "recursion_limit": max(1, max_execution_steps),
+        }
         if model_spec:
             config["configurable"]["model"] = model_spec
 
@@ -167,9 +279,12 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
             config["configurable"]["domain"] = domain
 
         if resume_command is not None:
-            await consume_graph_stream(
-                graph, run_id, thread_id, config, resume_command=resume_command,
-                context=context,
+            await asyncio.wait_for(
+                consume_graph_stream(
+                    graph, run_id, thread_id, config, resume_command=resume_command,
+                    context=context,
+                ),
+                timeout=_agent_run_timeout_seconds(),
             )
         else:
             human_content = query
@@ -178,10 +293,13 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
                     {"type": "text", "text": query},
                     {"type": "image_url", "image_url": {"url": image_content}},
                 ]
-            await consume_graph_stream(
-                graph, run_id, thread_id, config,
-                initial_input={"messages": [HumanMessage(content=human_content)]},
-                context=context,
+            await asyncio.wait_for(
+                consume_graph_stream(
+                    graph, run_id, thread_id, config,
+                    initial_input={"messages": [HumanMessage(content=human_content)]},
+                    context=context,
+                ),
+                timeout=_agent_run_timeout_seconds(),
             )
     except asyncio.CancelledError:
         raise

@@ -22,7 +22,6 @@ from server.models import Agent, Base, User  # noqa: E402
 from server.routers import router  # noqa: E402
 from server.routers.run_router import run_router  # noqa: E402
 from server.utils.auth import hash_password  # noqa: E402
-from server.utils.datetime_utils import utc_now  # noqa: E402
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -30,33 +29,33 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # 确保内置默认 agent 存在
     async with async_session_factory() as db:
         from sqlalchemy import select as sa_select
+
+        # 确保内置 Agent 存在：通用对话助手 + 独立数据分析助手
         r = await db.execute(sa_select(Agent).where(Agent.slug == "default-chatbot"))
         if not r.scalar_one_or_none():
-            agent = Agent(
-                id="default-chatbot",
-                slug="default-chatbot",
-                name="对话助手",
+            db.add(Agent(
+                id="default-chatbot", slug="default-chatbot", name="对话助手",
                 description="内置对话智能体，支持 Text2SQL",
-                backend_id="ChatbotAgent",
-                is_builtin=True,
-            )
-            db.add(agent)
-            await db.commit()
+                backend_id="ChatbotAgent", is_builtin=True,
+            ))
+
+        r = await db.execute(sa_select(Agent).where(Agent.slug == "data-agent"))
+        if not r.scalar_one_or_none():
+            db.add(Agent(
+                id="data-agent", slug="data-agent", name="数据分析助手",
+                description="按知识库口径、元数据和只读 SQL 完成企业数据分析",
+                backend_id="DataAgent", is_builtin=True,
+            ))
 
         # 确保至少有一个用户（开发环境）
         r = await db.execute(sa_select(User).where(User.is_deleted == 0).limit(1))
         if not r.scalar_one_or_none():
-            user = User(
-                username="admin",
-                uid="admin",
-                password_hash=hash_password("admin123456"),
+            db.add(User(
+                username="admin", uid="admin", password_hash=hash_password("admin123456"),
                 role="superadmin",
-            )
-            db.add(user)
-            await db.commit()
+            ))
 
         from server.services.model_providers.service import (
             ensure_builtin_model_providers_in_db,
@@ -85,6 +84,18 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Built-in MCP servers initialization failed: {exc}")
 
     from server.services.task_service import tasker
+    from server.services.knowledge_service import rebuild_rag_indexes
+    from server.services.run_service import recover_orphaned_agent_runs, resume_pending_agent_runs
+    async with async_session_factory() as index_db:
+        indexed_documents = await rebuild_rag_indexes(index_db)
+    if indexed_documents:
+        logger.info("Rebuilt RAG keyword index: %d documents", indexed_documents)
+    recovered = await recover_orphaned_agent_runs()
+    if recovered:
+        logger.warning("Recovered %d orphaned Agent runs after service restart", recovered)
+    resumed = await resume_pending_agent_runs()
+    if resumed:
+        logger.info("Resumed %d pending Agent runs after service restart", resumed)
     await tasker.start()
     await tasker.start_scheduler()
 

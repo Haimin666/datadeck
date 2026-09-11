@@ -145,36 +145,12 @@ class Tasker:
                 logger.exception("Scheduled task dispatcher error: %s", exc)
                 await asyncio.sleep(20)
 
-    @staticmethod
-    def _cron_match(expression: str, now: datetime) -> bool:
-        values = [now.minute, now.hour, now.day, now.month, (now.weekday() + 1) % 7]
-        ranges = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 6)]
-        fields = expression.split()
-        if len(fields) != 5:
-            return False
-        for field_value, field, (lower, upper) in zip(values, fields, ranges):
-            allowed: set[int] = set()
-            for part in field.split(","):
-                base, _, step_text = part.partition("/")
-                step = int(step_text or 1)
-                if step <= 0:
-                    return False
-                if base == "*":
-                    start, end = lower, upper
-                elif "-" in base:
-                    start_text, end_text = base.split("-", 1)
-                    start, end = int(start_text), int(end_text)
-                else:
-                    start = end = int(base)
-                allowed.update(range(start, end + 1, step))
-            if field_value not in allowed:
-                return False
-        return True
-
     async def _dispatch_scheduled_tasks(self) -> None:
         from sqlalchemy import select
         from server.db import async_session_factory
         from server.models import ScheduledTask
+
+        from server.utils.cron import cron_matches
 
         now = datetime.now().replace(second=0, microsecond=0)
         async with async_session_factory() as db:
@@ -182,7 +158,7 @@ class Tasker:
             for definition in rows:
                 tick = now.isoformat()
                 try:
-                    matches = self._cron_match(definition.cron, now)
+                    matches = cron_matches(definition.cron, now)
                 except (TypeError, ValueError):
                     logger.warning("Skip invalid scheduled task cron: %s", definition.id)
                     matches = False

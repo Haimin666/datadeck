@@ -101,7 +101,14 @@ def _drop_test_schema() -> None:
 
     dsn = TEST_DATABASE_URL.replace("+asyncpg", "")
     with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute("DROP SCHEMA public CASCADE")
+        # TestClient 的异步 engine 可能在 fixture 退出时仍有连接持有
+        # schema 锁；测试库是专用库，只清理其它测试连接。
+        conn.execute(
+            "SELECT pg_terminate_backend(pid) "
+            "FROM pg_stat_activity "
+            "WHERE datname = current_database() AND pid <> pg_backend_pid()"
+        )
+        conn.execute("DROP SCHEMA IF EXISTS public CASCADE")
         conn.execute("CREATE SCHEMA public")
 
 

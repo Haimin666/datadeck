@@ -22,12 +22,13 @@ async def platform_context_skills_resolver(context) -> None:
         setattr(context, "_runtime_skills", {})
         setattr(context, "_preloaded_skills", [])
         setattr(context, "_preloaded_skill_contents", {})
+        setattr(context, "_skill_tool_instances", [])
+        setattr(context, "_platform_tools", [])
         return
 
     try:
         from server.db import session_context
         from server.models import User
-        from server.repositories.user_repository import UserRepository
         from server.services.skills.runtime import resolve_runtime_skills_for_context
 
         from sqlalchemy import select
@@ -39,7 +40,9 @@ async def platform_context_skills_resolver(context) -> None:
                 setattr(context, "_effective_skill_slugs", [])
                 setattr(context, "_runtime_skills", {})
                 setattr(context, "_preloaded_skills", [])
-                setattr(context, "_preloaded_skill_contents", [])
+                setattr(context, "_preloaded_skill_contents", {})
+                setattr(context, "_skill_tool_instances", [])
+                setattr(context, "_platform_tools", [])
                 return
             snapshot = await resolve_runtime_skills_for_context(context, db=db, user=user)
             context.skills = snapshot["context_skills"]
@@ -48,6 +51,10 @@ async def platform_context_skills_resolver(context) -> None:
             setattr(context, "_runtime_skills", snapshot["runtime_skills"])
             setattr(context, "_preloaded_skills", snapshot["preloaded_skills"])
             setattr(context, "_preloaded_skill_contents", snapshot["preloaded_skill_contents"])
+            from server.services.skills.runtime import resolve_skill_gated_tools
+            setattr(context, "_skill_tool_instances", resolve_skill_gated_tools(context))
+            from server.services.agent_runtime_tools import build_agent_runtime_tools
+            setattr(context, "_platform_tools", build_agent_runtime_tools(context, user))
     except Exception as e:
         # Skills 面板故障不应阻断对话主链路
         logger.warning(f"resolve skills for context failed, fallback to empty: {e}")
@@ -55,13 +62,16 @@ async def platform_context_skills_resolver(context) -> None:
         setattr(context, "_runtime_skills", {})
         setattr(context, "_preloaded_skills", [])
         setattr(context, "_preloaded_skill_contents", {})
+        setattr(context, "_skill_tool_instances", [])
+        setattr(context, "_platform_tools", [])
 
 
 async def platform_extra_middlewares(context) -> list:
     """宿主平台 middleware 工厂：SkillsMiddleware（提示注入 + 依赖门控 + 动态激活）。"""
     effective_skills = getattr(context, "_effective_skill_slugs", None)
-    if not isinstance(effective_skills, list) or not effective_skills:
-        # 无可用 Skill 时跳过，避免空提示注入
+    configured_mcps = getattr(context, "mcps", None)
+    if (not isinstance(effective_skills, list) or not effective_skills) and not configured_mcps:
+        # 没有 Skill 或直接 MCP 配置时才跳过，避免漏装 Agent 级 MCP。
         return []
     try:
         from server.services.skills.middleware import SkillsMiddleware

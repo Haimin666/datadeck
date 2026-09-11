@@ -59,6 +59,8 @@ def load_chat_model(spec: ChatModelSpec, provider: ModelProvider, **kwargs) -> B
         "base_url": spec.base_url or None,
         "temperature": spec.temperature,
         "stream_usage": True,
+        "timeout": float(os.getenv("DATADECK_MODEL_TIMEOUT", "90")),
+        "max_retries": 0,
     }
     model_kwargs.update(kwargs)
     proxy = os.getenv("DATADECK_MODEL_HTTP_PROXY")

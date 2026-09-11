@@ -30,7 +30,7 @@ from server.utils.datetime_utils import utc_now_naive
 from server.utils.sse_utils import format_sse, format_heartbeat
 
 # updates 里非 messages 的结构化 state 字段（翻译为 agent_state）
-_AGENT_STATE_KEYS = ("todos", "artifacts", "token_usage", "sql_validation")
+_AGENT_STATE_KEYS = ("todos", "artifacts", "token_usage", "sql_validation", "data_workflow")
 
 # ── 进程内实时事件总线 ──────────────────────────────────────────
 # append_event 落库后立即 publish，poll_run_events 优先消费内存事件、

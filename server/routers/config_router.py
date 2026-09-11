@@ -1,8 +1,7 @@
-"""系统/用户配置 KV 存储 + 工具列表（P0-8）。
+"""系统/用户配置 KV 存储（P0-8）。
 
 - system_configs: 全局配置（管理员读写；前端 configStore 消费 {key: value} 平铺字典）
 - user_configs:   每用户配置（登录即读写；enable_memory 等）
-- /api/system/tools: 工具注册表列表（前端 Agent 配置下拉）
 - /api/user/agent-env, /api/user/upload-image: 个人环境与头像
 """
 
@@ -12,12 +11,11 @@ import os
 import uuid as _uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
-from pydantic import BaseModel
 from sqlalchemy import text as sa_text
 
 from server.db import async_session_factory, get_db
 from server.deps import get_required_user
-from server.models import SystemConfig, User, UserConfig
+from server.models import User
 from server.utils.datetime_utils import utc_now_naive
 
 config_router = APIRouter(tags=["config"])
@@ -159,44 +157,6 @@ async def get_system_logs(
                     continue
                 entries.append({"level": lvl, "line": ln.rstrip()[:500]})
     return {"logs": entries[-limit:]}
-
-
-# ── 工具列表（前端 Agent 配置下拉） ─────────────────────
-
-@config_router.get("/system/tools")
-async def get_tools(
-    category: str = Query(""),
-    current_user: User = Depends(get_required_user),
-):
-    from datadeck.agents.toolkits.registry import get_all_extra_metadata, get_all_tool_instances
-
-    meta = get_all_extra_metadata()
-    tools = []
-    for t in get_all_tool_instances():
-        m = meta.get(t.name)
-        if category and (m.category if m else "buildin") != category:
-            continue
-        tools.append({
-            "name": t.name,
-            "display_name": (m.display_name if m else "") or t.name,
-            "description": t.description or "",
-            "category": m.category if m else "buildin",
-            "tags": m.tags if m else [],
-        })
-    return {"tools": tools}
-
-
-@config_router.get("/system/tools/options")
-async def get_tool_options(current_user: User = Depends(get_required_user)):
-    """工具下拉选项：buildin + data 全部。"""
-    from datadeck.agents.toolkits.registry import get_all_extra_metadata, get_all_tool_instances
-
-    meta = get_all_extra_metadata()
-    options = [
-        {"value": t.name, "label": (meta.get(t.name).display_name if meta.get(t.name) else "") or t.name}
-        for t in get_all_tool_instances()
-    ]
-    return {"options": options}
 
 
 # ── 用户个人配置 ──────────────────────────────────────────

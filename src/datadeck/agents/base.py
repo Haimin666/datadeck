@@ -10,8 +10,6 @@ checkpointer 经 CheckpointerProvider 注入（历史/恢复由宿主提供）�
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Any
-
 from langgraph.graph.state import CompiledStateGraph
 
 from datadeck.agents.context import DEFAULT_MAX_EXECUTION_STEPS
@@ -103,8 +101,8 @@ class BaseAgent:
         ):
             yield event["messages"]
 
-    async def check_checkpointer(self) -> bool:
-        app = await self.get_graph()
+    async def check_checkpointer(self, app=None) -> bool:
+        app = app or await self.get_graph()
         return bool(getattr(app, "checkpointer", None))
 
     async def get_history(self, uid, thread_id) -> list[dict]:
@@ -114,7 +112,7 @@ class BaseAgent:
         except Exception as exc:  # noqa: BLE001
             logger.error(f"get_history: build graph failed: {exc}")
             return []
-        if not await self.check_checkpointer():
+        if not await self.check_checkpointer(app):
             return []
         config = {"configurable": {"thread_id": thread_id, "uid": uid}}
         try:

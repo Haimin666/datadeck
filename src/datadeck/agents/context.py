@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import MISSING, dataclass, field, fields
-from typing import Any, get_origin
+from typing import get_origin
 
 # ── 摘要/预算默认常量（自 Yuxi 原样迁移）─────────────────────────
 DEFAULT_SUMMARY_THRESHOLD_K = 100            # 100K tokens 触发摘要
@@ -85,6 +85,8 @@ class BaseContext:
         metadata={"name": "请求 ID", "configurable": False, "hide": True},
     )
 
+    subagent_depth: int = field(default=0, metadata={"hide": True})
+
     model: str = field(
         default="",
         metadata={"name": "模型", "description": "使用的聊天模型 spec (provider:model_id)", "type": "string"},
@@ -100,9 +102,32 @@ class BaseContext:
         metadata={"name": "工具", "description": "启用的工具 slug 列表，None 表示全部可用", "type": "list", "kind": "tools"},
     )
 
+    knowledge_base_id: str | None = field(
+        default=None,
+        metadata={"name": "知识库", "description": "本次 Agent 检索使用的知识库 ID", "type": "string", "kind": "knowledge"},
+    )
+
+    knowledges: list[str] | None = field(
+        default=None,
+        metadata={"name": "知识库", "description": "本次 Agent 检索使用的知识库 ID 列表", "type": "list", "kind": "knowledges"},
+    )
+
+    # 由宿主根据 knowledge_base_id 做权限校验后注入，核心层不自行解析数据库。
+    knowledge_base_collection: str | None = field(default=None, metadata={"hide": True})
+
+    mcps: list[str] | None = field(
+        default=None,
+        metadata={"name": "MCP 服务", "description": "本次 Agent 可使用的 MCP 服务 slug 列表", "type": "list", "kind": "mcp"},
+    )
+
     skills: list[str] | None = field(
         default=None,
         metadata={"name": "Skills", "description": "启用的 Skill slug 列表", "type": "list", "kind": "skills"},
+    )
+
+    subagents: list[str] | None = field(
+        default=None,
+        metadata={"name": "子智能体", "description": "允许主智能体分派的子智能体 slug 列表", "type": "list", "kind": "subagents"},
     )
 
     preload_skills: list[str] | None = field(
@@ -176,6 +201,4 @@ class BaseContext:
         return configurable_items
 
     def update_from_dict(self, data: dict):
-        for key, value in data.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
+        self.update(data)

@@ -15,7 +15,11 @@ ToolApprovalMode = Literal["default", "always_trust", "none"]
 
 DEFAULT_TOOL_APPROVAL_MODE: ToolApprovalMode = "default"
 TOOL_APPROVAL_MODES = frozenset({"default", "always_trust", "none"})
-SENSITIVE_BACKEND_TOOLS = frozenset({"write_file", "edit_file", "execute", "workspace_write_file"})
+SENSITIVE_BACKEND_TOOLS = frozenset({
+    "write_file", "edit_file", "execute", "workspace_write_file",
+    "scheduled_task_create", "scheduled_task_update", "scheduled_task_delete",
+    "subagent_start", "subagent_orchestrate", "subagent_cancel",
+})
 _ALLOWED_DECISIONS = ["approve", "reject"]
 
 
@@ -43,6 +47,12 @@ def create_tool_approval_middleware(
             "edit_file": {"allowed_decisions": _ALLOWED_DECISIONS, "when": write_requires_approval},
             "execute": {"allowed_decisions": _ALLOWED_DECISIONS},
             "workspace_write_file": {"allowed_decisions": _ALLOWED_DECISIONS},
+            "scheduled_task_create": {"allowed_decisions": _ALLOWED_DECISIONS},
+            "scheduled_task_update": {"allowed_decisions": _ALLOWED_DECISIONS},
+            "scheduled_task_delete": {"allowed_decisions": _ALLOWED_DECISIONS},
+            "subagent_start": {"allowed_decisions": _ALLOWED_DECISIONS},
+            "subagent_orchestrate": {"allowed_decisions": _ALLOWED_DECISIONS},
+            "subagent_cancel": {"allowed_decisions": _ALLOWED_DECISIONS},
         }
     )
 

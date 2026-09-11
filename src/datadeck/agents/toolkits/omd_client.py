@@ -14,6 +14,7 @@ import ssl
 import asyncio
 import urllib.parse
 import urllib.request
+import http.cookiejar
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -26,6 +27,13 @@ def _ssl_context() -> ssl.SSLContext:
         context.verify_mode = ssl.CERT_NONE
         return context
     return ssl.create_default_context()
+
+
+_DIRECT_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    urllib.request.HTTPSHandler(context=_ssl_context()),
+    urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+)
 
 
 def omd_base_url() -> str:
@@ -77,7 +85,7 @@ def _api_get(path: str, retries: int = 2) -> dict[str, Any] | None:
     import time
     for attempt in range(retries):
         try:
-            with urllib.request.urlopen(req, context=_ssl_context(), timeout=30) as resp:
+            with _DIRECT_OPENER.open(req, timeout=30) as resp:
                 import json
                 return json.loads(resp.read().decode("utf-8"))
         except Exception:
@@ -132,7 +140,7 @@ def _pg_fallback(action: str) -> dict[str, Any] | None:
             return {"ok": True, "source": "pg_fallback",
                     "schemas": [{"name": r["name"], "fqn": r["name"]} for r in rows]}
         return None
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         return None
 
 

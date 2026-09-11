@@ -11,14 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.db import get_db
 from server.deps import get_required_user
 from server.models import User, Agent, ScheduledTask
-from datadeck.agents.buildin.chatbot.graph import ChatbotAgent
 from datadeck.agents.toolkits.service import get_tool_metadata
-from datadeck.ports.checkpointer import CheckpointerProvider
 
 agent = APIRouter(prefix="/agent", tags=["agent"])
 
 
-def _configurable_items() -> dict:
+def _configurable_items(knowledge_options: list[dict] | None = None,
+                        subagent_options: list[dict] | None = None) -> dict:
     tools = get_tool_metadata()
     return {
         "tools": {
@@ -30,7 +29,35 @@ def _configurable_items() -> dict:
                 {"value": tool["slug"], "name": tool["name"], "description": tool["description"]}
                 for tool in tools
             ],
-        }
+        },
+        "knowledges": {
+            "name": "知识库",
+            "description": "选择 Agent 检索使用的知识库；留空时使用当前用户最近的知识库",
+            "type": "list",
+            "kind": "knowledges",
+            "options": knowledge_options or [],
+        },
+        "skills": {
+            "name": "Skills",
+            "description": "启用的 Skill slug 列表",
+            "type": "list",
+            "kind": "skills",
+            "options": [],
+        },
+        "mcps": {
+            "name": "MCP 服务",
+            "description": "启用的 MCP 服务 slug 列表",
+            "type": "list",
+            "kind": "mcp",
+            "options": [],
+        },
+        "subagents": {
+            "name": "子智能体",
+            "description": "允许主智能体分派任务的子智能体",
+            "type": "list",
+            "kind": "subagents",
+            "options": subagent_options or [],
+        },
     }
 
 
@@ -75,6 +102,13 @@ async def _get_agent_by_identifier(db: AsyncSession, identifier: str) -> Agent |
 async def list_backends():
     """列出内置 agent 后端。"""
     backends = [
+        {
+            "id": "DataAgent",
+            "name": "数据分析助手",
+            "description": "按知识库口径、元数据和只读 SQL 完成企业数据分析",
+            "type": "agent_backend",
+            "is_builtin": True,
+        },
         {
             "id": "ChatbotAgent",
             "name": "对话助手",
@@ -134,10 +168,20 @@ async def get_agent(
     a = await _get_agent_by_identifier(db, agent_id)
     if not a:
         raise HTTPException(status_code=404, detail="智能体不存在")
+    from server.services.knowledge_service import list_knowledge_bases
+
+    knowledge_options = await list_knowledge_bases(db, current_user.uid)
+    subagents = (await db.execute(
+        select(Agent).where(Agent.is_subagent == True).order_by(Agent.name)  # noqa: E712
+    )).scalars().all()
+    subagent_options = [
+        {"value": item.slug, "name": item.name, "description": item.description or ""}
+        for item in subagents
+    ]
     return {
         "agent": {
             **_serialize_agent(a, current_user),
-            "configurable_items": _configurable_items(),
+            "configurable_items": _configurable_items(knowledge_options, subagent_options),
         }
     }
 

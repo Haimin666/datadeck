@@ -13,7 +13,8 @@ import {
   MessageCirclePlus,
   Search,
   Clock,
-  Database
+  Database,
+  ListChecks
 } from '@lucide/vue'
 
 import { useConfigStore } from '@/stores/config'
@@ -191,6 +192,14 @@ const mainList = computed(() => {
     activePaths: ['/scheduled-tasks'],
     icon: Clock,
     activeIcon: Clock
+  })
+
+  if (userStore.isAdmin) items.push({
+    name: '指标口径',
+    path: '/metrics',
+    activePaths: ['/metrics'],
+    icon: ListChecks,
+    activeIcon: ListChecks
   })
 
   if (userStore.isSuperAdmin) {

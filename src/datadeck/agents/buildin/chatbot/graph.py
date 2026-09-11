@@ -10,7 +10,6 @@ from __future__ import annotations
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelRetryMiddleware, TodoListMiddleware
-from langchain.agents.middleware.summarization import SummarizationMiddleware
 
 from datadeck.agents.base import BaseAgent
 from datadeck.agents.buildin.chatbot.context import ChatBotContext
@@ -20,6 +19,7 @@ from datadeck.agents.buildin.chatbot.state import ChatBotState
 from datadeck.agents.context import BaseContext
 from datadeck.agents.middlewares import TokenUsageMiddleware
 from datadeck.agents.middlewares.data_selfcheck import create_data_selfcheck_middleware
+from datadeck.agents.middlewares.data_workflow import DataWorkflowMiddleware
 from datadeck.agents.middlewares.memory import create_memory_middleware
 from datadeck.agents.middlewares.sql_selfcheck import create_sql_selfcheck_middleware
 from datadeck.agents.middlewares.summary import create_summary_middleware
@@ -47,6 +47,8 @@ async def _build_middlewares(context: BaseContext, *, model, memory_store: Memor
     data_selfcheck_middleware = create_data_selfcheck_middleware(context)
     if data_selfcheck_middleware:
         middlewares.append(data_selfcheck_middleware)
+    if bool(getattr(context, "data_workflow_enabled", False)):
+        middlewares.append(DataWorkflowMiddleware())
     memory_middleware = await create_memory_middleware(context, store=memory_store)
     if memory_middleware:
         middlewares.append(memory_middleware)
@@ -99,9 +101,25 @@ class ChatbotAgent(BaseAgent):
             middlewares.extend(await self._extra_middlewares(context))
 
         tools = await resolve_configured_runtime_tools(context)
+        # 宿主已完成 Skill 授权后，把其本地依赖注册进 ToolNode；中间件只负责按需隐藏/展示。
+        tool_names = {tool.name for tool in tools}
+        for skill_tool in getattr(context, "_skill_tool_instances", []) or []:
+            if skill_tool.name not in tool_names:
+                tools.append(skill_tool)
+                tool_names.add(skill_tool.name)
+        for platform_tool in getattr(context, "_platform_tools", []) or []:
+            if platform_tool.name not in tool_names:
+                tools.append(platform_tool)
+                tool_names.add(platform_tool.name)
         system_prompt = build_prompt_with_context(context)
         if any(getattr(t, "name", "").startswith(("sql_execute", "omd_", "rag_")) for t in tools):
             system_prompt = build_data_agent_prompt(system_prompt)
+        collection = getattr(context, "knowledge_base_collection", None)
+        if collection:
+            system_prompt += (
+                "\n\n当前会话已选择知识库。调用 rag_search 时必须传入 "
+                f'collection_name="{collection}"，不得检索其他知识库。'
+            )
 
         return create_agent(
             model=model,

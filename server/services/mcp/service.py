@@ -36,6 +36,15 @@ _mcp_tools_cache: dict[str, list[Callable[..., Any]]] = {}
 _mcp_tools_stats: dict[str, dict[str, int]] = {}
 _USER_CONFIGURABLE_TRANSPORTS = ("sse", "streamable_http")
 
+
+def _mcp_discovery_timeout(config: dict[str, Any]) -> float:
+    """限制工具发现阶段，避免 MCP 不可用时阻塞整个 Agent 建图。"""
+    try:
+        value = float(config.get("timeout") or 30)
+    except (TypeError, ValueError):
+        value = 30.0
+    return min(max(value, 1.0), 120.0)
+
 # Default MCP Server configurations (Imported to DB on first run)
 _DEFAULT_MCP_SERVERS = {
     "mcp-server-chart": {
@@ -299,7 +308,9 @@ async def get_mcp_tools(
             if client is None:
                 return []
 
-            raw_tools = cast(list[Any], await client.get_tools())
+            raw_tools = cast(list[Any], await asyncio.wait_for(
+                client.get_tools(), timeout=_mcp_discovery_timeout(server_config)
+            ))
 
             server_cc = to_camel_case(server_slug)
             for tool in raw_tools:

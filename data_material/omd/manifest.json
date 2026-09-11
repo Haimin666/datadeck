@@ -1,0 +1,21 @@
+{
+  "source_type": "omd",
+  "service": "数仓HIVE",
+  "database": "default",
+  "collected_at": "2026-09-10T19:04:14.400586+00:00",
+  "schema_count": 9,
+  "table_count": 5167,
+  "detail_failed": 0,
+  "schemas": [
+    "lion_dw_app",
+    "lion_dw_dim",
+    "lion_dw_dm",
+    "lion_dw_dwd",
+    "lion_dw_dws",
+    "lion_dw_ods",
+    "lion_dw_sy",
+    "lion_dw_test",
+    "lion_dw_tmp"
+  ],
+  "failures": []
+}

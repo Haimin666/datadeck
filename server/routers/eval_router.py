@@ -33,6 +33,16 @@ def _admin_check(user) -> None:
         raise HTTPException(status_code=403, detail="需要管理员权限")
 
 
+def _extract_stream_event(event: dict) -> tuple[str, str | None]:
+    """读取当前 run_events → SSE 的嵌套事件契约。"""
+    payload = event.get("payload") or {}
+    chunk = payload.get("chunk") if isinstance(payload, dict) else None
+    stream_event = chunk.get("stream_event") if isinstance(chunk, dict) else None
+    if not isinstance(stream_event, dict):
+        return "", None
+    return str(stream_event.get("type") or ""), stream_event.get("content") or stream_event.get("name")
+
+
 @eval_router.post("/cases")
 async def add_case(payload: CaseIn, current_user=Depends(get_required_user),
                    db: AsyncSession = Depends(get_db)):
@@ -66,6 +76,7 @@ async def run_evaluation(payload: dict, current_user=Depends(get_required_user),
     dataset = payload.get("dataset", "default")
     limit = int(payload.get("limit", 10))
     token = str(payload.get("token") or "").strip()
+    agent_slug = str(payload.get("agent_slug") or "default-chatbot").strip()
     if not token:
         raise HTTPException(status_code=400, detail="需要提供登录 token（data: {\"token\": \"<JWT>\"}）供评测内部调用")
 
@@ -76,7 +87,7 @@ async def run_evaluation(payload: dict, current_user=Depends(get_required_user),
 
     results = []
     for case in cases:
-        answer, tools, status = await _run_one(token, case.question)
+        answer, tools, status = await _run_one(token, case.question, agent_slug)
         verdict = judge_case(answer, tools, case.expect_tools or [], case.expect_keywords or [])
         results.append({
             "question": case.question,
@@ -103,15 +114,15 @@ async def run_evaluation(payload: dict, current_user=Depends(get_required_user),
     }
 
 
-async def _run_one(token: str, question: str) -> tuple[str, list[str], str]:
+async def _run_one(token: str, question: str, agent_slug: str = "default-chatbot") -> tuple[str, list[str], str]:
     """单 case 走真实 run + SSE 链路。"""
     base = "http://localhost:8000"
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(base_url=base, timeout=httpx.Timeout(240)) as c:
-        th = (await c.post("/api/chat/thread", json={"agent_id": "default-chatbot", "title": "eval"},
+        th = (await c.post("/api/chat/thread", json={"agent_id": agent_slug, "title": "eval"},
                            headers=headers)).json()["thread"]["id"]
         r = await c.post("/api/agent/runs", json={
-            "query": question, "agent_slug": "default-chatbot",
+            "query": question, "agent_slug": agent_slug,
             "thread_id": th, "queue_policy": "enqueue"}, headers=headers)
         rid = r.json()["run"]["id"]
 
@@ -124,11 +135,10 @@ async def _run_one(token: str, question: str) -> tuple[str, list[str], str]:
                     ev = json.loads(line[5:])
                 except json.JSONDecodeError:
                     continue
-                if ev.get("event") == "stream_event":
-                    p = ev["payload"]
-                    if p.get("type") == "message_delta":
-                        answer += p["delta"]["content"]
-                    elif p.get("type") == "tool_call":
-                        tools.append(p["tool_call"]["name"])
+                event_type, value = _extract_stream_event(ev)
+                if event_type == "message_delta":
+                    answer += str(value or "")
+                elif event_type == "tool_call" and value:
+                    tools.append(str(value))
         status = (await c.get(f"/api/agent/runs/{rid}", headers=headers)).json()["run"]["status"]
         return answer, tools, status

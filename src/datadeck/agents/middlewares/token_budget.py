@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, ModelRequest, ModelResponse
-from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 DEFAULT_BUDGET_TOKENS = 60_000

@@ -36,7 +36,7 @@ __all__ = [
 
 SQL_FEEDBACK_PREFIX = "[SQL 校验未通过]"
 # 仅认 ```sql 标记的代码块（```json 等其他围栏不算 SQL）
-SQL_FENCE_RE = re.compile(r"```sql\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+SQL_FENCE_RE = re.compile(r"```sql\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 # 裸语句：关键词后至少 4 个字符（能否算 SQL 由"能否解析"门控决定）
 _BARE_SQL_RE = re.compile(r"\b(?:SELECT|WITH)\b[\s\S]{4,}", re.IGNORECASE)
 
@@ -132,14 +132,22 @@ class SqlSelfCheckMiddleware(AgentMiddleware):
         if not messages:
             return None
 
+        turn_base = max(
+            (i for i, message in enumerate(messages)
+             if getattr(message, "type", "") == "human"),
+            default=-1,
+        )
         attempts = int(state.get("sql_retry_attempts") or 0)
+        if state.get("sql_turn_base") != turn_base:
+            attempts = 0
+        base_update = {"sql_turn_base": turn_base}
         last = messages[-1]
         content = getattr(last, "content", None)
         if not isinstance(content, str):
             return None
 
         if not has_sql_content(content):
-            update: dict = {"sql_validation": {"status": "skipped_no_sql", "attempts": 0}}
+            update: dict = {**base_update, "sql_validation": {"status": "skipped_no_sql", "attempts": 0}}
             if attempts:
                 update["sql_retry_attempts"] = 0
             return update
@@ -154,7 +162,7 @@ class SqlSelfCheckMiddleware(AgentMiddleware):
             payload = result.to_payload()
             payload["status"] = "passed"
             payload["attempts"] = attempts
-            update = {"sql_validation": payload}
+            update = {**base_update, "sql_validation": payload}
             if attempts:
                 update["sql_retry_attempts"] = 0
             return update
@@ -162,6 +170,7 @@ class SqlSelfCheckMiddleware(AgentMiddleware):
         if attempts >= self._max_reflect:
             logger.warning("sql_selfcheck: 重试 %d 次仍未通过，保留最近版本并标记警示", attempts)
             return {
+                **base_update,
                 "sql_retry_attempts": 0,
                 "sql_validation": {
                     "status": "gave_up",
@@ -176,6 +185,7 @@ class SqlSelfCheckMiddleware(AgentMiddleware):
         feedback = sql_feedback_message(
             [i.to_payload() for i in result.issues], attempts + 1, self._max_reflect)
         return {
+            **base_update,
             "jump_to": "model",
             "sql_retry_attempts": attempts + 1,
             "messages": [AIMessage(content=feedback)],
@@ -193,4 +203,3 @@ def create_sql_selfcheck_middleware(context) -> SqlSelfCheckMiddleware | None:
         max_joins=int(getattr(context, "sql_max_joins", 6)),
         enabled=True,
     )
-

@@ -5,14 +5,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage
 from langchain_core.messages.utils import count_tokens_approximately
-from langgraph.types import Command
 
 
 class TokenUsagePayload(TypedDict, total=False):

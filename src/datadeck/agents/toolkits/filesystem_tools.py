@@ -38,7 +38,7 @@ def build_filesystem_tools(workdir: WorkdirCapability) -> list:
         result = workdir.write_file(path, content.encode("utf-8"))
         return json.dumps(result, ensure_ascii=False)
 
-    return [
+    tools = [
         StructuredTool.from_function(
             list_directory,
             name="workspace_list_directory",
@@ -60,3 +60,6 @@ def build_filesystem_tools(workdir: WorkdirCapability) -> list:
             description="写入当前项目工作目录内的文本文件；仅在用户明确要求时使用。",
         ),
     ]
+    for tool in tools:
+        tool.handle_tool_error = True
+    return tools

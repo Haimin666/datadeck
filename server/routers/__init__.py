@@ -20,6 +20,7 @@ from server.routers.mcp_router import mcp
 from server.routers.tool_router import tools
 from server.routers.task_router import tasks
 from server.routers.scheduled_task_router import scheduled_tasks
+from server.routers.metric_router import metrics
 
 router = APIRouter()
 router.include_router(system)
@@ -44,3 +45,4 @@ router.include_router(mcp)
 router.include_router(tools)
 router.include_router(tasks)
 router.include_router(scheduled_tasks)
+router.include_router(metrics)

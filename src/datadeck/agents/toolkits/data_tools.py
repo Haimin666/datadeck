@@ -34,9 +34,11 @@ async def omd_list_databases() -> dict:
     """List all databases and schemas in the enterprise data warehouse (via OpenMetadata)."""
     from datadeck.agents.toolkits.omd_client import list_databases, list_schemas
 
-    dbs = list_databases()
+    from datadeck.agents.toolkits.circuit_breaker import aguard
+
+    dbs = await aguard("omd_list_databases", lambda: _sync(list_databases))
     if dbs.get("ok"):
-        schemas = list_schemas()
+        schemas = await aguard("omd_list_databases", lambda: _sync(list_schemas))
         dbs["schemas"] = schemas.get("schemas", []) if schemas.get("ok") else []
     return dbs
 
@@ -89,10 +91,16 @@ async def omd_get_table_lineage(
 @tool(category="data", tags=["RAG", "知识库", "指标口径"], display_name="知识库检索",
       description="检索企业指标口径/业务知识文档。用于：用户问【指标定义/口径/计算公式/业务概念】时，"
                   "例如'逾期率怎么算'。返回相关文档片段与来源。domain 可选：限定业务域（如 credit/risk）。")
-async def rag_search(query: str, top_k: int = 5, domain: str = "") -> dict:
+async def rag_search(query: str, top_k: int = 5, domain: str = "",
+                     collection_name: str = "") -> dict:
     """Search the enterprise knowledge base (metric definitions & business docs) by hybrid retrieval.
     domain: optional business domain filter, empty string means all domains."""
     from datadeck.agents.toolkits.circuit_breaker import aguard
     from datadeck.agents.toolkits.rag_store import search
 
-    return await aguard("rag_search", lambda: _sync(search, query, top_k=top_k, domain=domain or None))
+    top_k = min(max(int(top_k), 1), 20)
+    return await aguard(
+        "rag_search",
+        lambda: _sync(search, query, top_k=top_k, domain=domain or None,
+                      collection_name=collection_name or None),
+    )

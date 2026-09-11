@@ -1,0 +1,13 @@
+{
+  "policy": "hot_cold",
+  "hot": "近90天更新、已审核指标、当前活跃表描述和最近产出快照",
+  "cold": "历史 Wiki 原文、旧版本指标、原始代码证据、已失效或低频表",
+  "retrieval": "热层优先；冷层仅在用户指定历史范围或热层低置信度时检索",
+  "source_of_truth": {
+    "business_definition": "wiki_and_approved_metric",
+    "table_lineage": "omd",
+    "implementation_evidence": "lion_dw_code",
+    "production_status": "runtime_partition_and_job_snapshot"
+  },
+  "generated_at": "2026-09-10T19:07:27.739644+00:00"
+}

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import time
+import urllib.parse
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain.agents.middleware.types import AgentState
@@ -36,11 +37,11 @@ FEEDBACK_PREFIX = "[数据自检未通过]"
 DEFAULT_MAX_REFLECT = 2
 _SCHEMA_CACHE_TTL = 120.0  # schema map 进程级缓存，避免每轮查库
 
-_SQL_FENCE_RE = re.compile(r"```sql\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_SQL_FENCE_RE = re.compile(r"```sql\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 _GAVE_UP_SUFFIX = "\n\n> ⚠️ 数据自检未通过：SQL 引用的表与真实数据源不符（已自动重试仍失败），请人工核对。"
 
-_schema_cache: dict = {"map": None, "at": 0.0}
+_schema_cache: dict = {"key": None, "map": None, "at": 0.0}
 
 
 def extract_sql(text: str) -> str | None:
@@ -49,8 +50,47 @@ def extract_sql(text: str) -> str | None:
 
 
 def _fetch_schema_map(force: bool = False) -> dict[str, set[str]] | None:
-    """同步 hook 不访问异步数据库；schema 查询由 ``_async_schema_map`` 完成。"""
-    return None
+    """同步 hook 使用同步驱动；async hook 走对应的异步驱动。"""
+    dsn = sql_dsn()
+    now = time.monotonic()
+    if (not force and _schema_cache["key"] == dsn and _schema_cache["map"] is not None
+            and now - _schema_cache["at"] < _SCHEMA_CACHE_TTL):
+        return _schema_cache["map"]
+    try:
+        if sql_dialect() == "postgres":
+            import psycopg
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT table_name, column_name FROM information_schema.columns "
+                        "WHERE table_schema NOT IN ('pg_catalog','information_schema')")
+                    rows = cursor.fetchall()
+        elif sql_dialect() in {"mysql", "doris"}:
+            import pymysql
+            parsed = urllib.parse.urlparse(dsn)
+            conn = pymysql.connect(
+                host=parsed.hostname or "127.0.0.1", port=parsed.port or 9030,
+                user=parsed.username or "root", password=parsed.password or "",
+                database=(parsed.path or "/").lstrip("/") or "default",
+            )
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT table_name, column_name FROM information_schema.columns "
+                        "WHERE table_schema = DATABASE()")
+                    rows = cursor.fetchall()
+            finally:
+                conn.close()
+        else:
+            return None
+        schema_map = {}
+        for table_name, column_name in rows:
+            schema_map.setdefault(str(table_name).lower(), set()).add(str(column_name).lower())
+        _schema_cache.update({"key": dsn, "map": schema_map, "at": now})
+        return schema_map
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"数据自检：同步元数据获取失败，跳过 ({str(exc)[:120]})")
+        return None
 
 
 def check_sql_against_schema(sql: str, schema_map: dict[str, set[str]]) -> list[str]:
@@ -102,21 +142,42 @@ class DataSelfCheckMiddleware(AgentMiddleware):
         if not sql_dsn():
             return None
         now = time.monotonic()
-        if _schema_cache["map"] is not None and now - _schema_cache["at"] < _SCHEMA_CACHE_TTL:
+        dsn = sql_dsn()
+        if (_schema_cache["key"] == dsn and _schema_cache["map"] is not None
+                and now - _schema_cache["at"] < _SCHEMA_CACHE_TTL):
             return _schema_cache["map"]
         try:
-            import asyncpg
-            conn = await asyncpg.connect(sql_dsn().replace("postgresql://", "postgres://", 1))
-            try:
-                rows = await conn.fetch(
-                    "SELECT table_name, column_name FROM information_schema.columns "
-                    "WHERE table_schema NOT IN ('pg_catalog','information_schema')")
-            finally:
-                await conn.close()
+            if sql_dialect() == "postgres":
+                import asyncpg
+                conn = await asyncpg.connect(dsn.replace("postgresql://", "postgres://", 1))
+                try:
+                    rows = await conn.fetch(
+                        "SELECT table_name, column_name FROM information_schema.columns "
+                        "WHERE table_schema NOT IN ('pg_catalog','information_schema')")
+                finally:
+                    await conn.close()
+            elif sql_dialect() in {"mysql", "doris"}:
+                import aiomysql
+                parsed = urllib.parse.urlparse(dsn)
+                conn = await aiomysql.connect(
+                    host=parsed.hostname or "127.0.0.1", port=parsed.port or 9030,
+                    user=parsed.username or "root", password=parsed.password or "",
+                    db=(parsed.path or "/").lstrip("/") or "default",
+                )
+                try:
+                    async with conn.cursor(aiomysql.DictCursor) as cursor:
+                        await cursor.execute(
+                            "SELECT table_name, column_name FROM information_schema.columns "
+                            "WHERE table_schema = DATABASE()")
+                        rows = await cursor.fetchall()
+                finally:
+                    conn.close()
+            else:
+                return None
             schema_map: dict[str, set[str]] = {}
             for row in rows:
                 schema_map.setdefault(row["table_name"].lower(), set()).add(row["column_name"].lower())
-            _schema_cache.update({"map": schema_map, "at": now})
+            _schema_cache.update({"key": dsn, "map": schema_map, "at": now})
             return schema_map
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"数据自检：异步元数据获取失败，跳过 ({str(exc)[:120]})")

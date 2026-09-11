@@ -109,6 +109,10 @@ async def resolve_runtime_skills_for_context(
     runtime_skills = build_runtime_skills(skill_items)
     available = set(runtime_skills)
     selected = normalize_string_list(getattr(context, "skills", None))
+    # 未配置 skills 时仍让 Agent 发现当前用户已授权的 Skill；具体内容继续按需读取。
+    # 这样新上传的个人 Skill 无需手工修改 Agent 配置才会出现在模型上下文中。
+    if not selected:
+        selected = list(runtime_skills)
     context_skills = [slug for slug in selected if slug in available]
     effective_skills = expand_skill_closure(context_skills, runtime_skills)
     configured_preloads = normalize_string_list(getattr(context, "preload_skills", None))

@@ -86,14 +86,16 @@ export function useAgentRequestQueue({
         const tsInner = getThreadState(threadId)
         const innerEntry = tsInner?.requestStreams?.[requestId]
         if (!tsInner || innerEntry?.controller !== controller) return
+        // 后端队列 SSE 使用 { event, payload } 包装；兼容旧的扁平事件格式。
+        const eventPayload = data?.payload || data || {}
 
         if (event === 'queued' && data) {
-          entry.position = data.position || entry.position
+          entry.position = eventPayload.position || entry.position
           const queuedRequest = tsInner.queuedRequests?.find((r) => r.request_id === requestId)
           if (queuedRequest) queuedRequest.queue_position = entry.position
         } else if (event === 'run_created' && data) {
           entry.status = 'dispatched'
-          if (data.run_id) {
+          if (eventPayload.run_id) {
             removeRequestFromQueue(tsInner, requestId)
             stopRequestStream(threadId, requestId)
 
@@ -103,7 +105,7 @@ export function useAgentRequestQueue({
               resetOnGoingConv(threadId, { preserveRequestStreams: true })
             }
             tsInner.pendingRequestId = requestId
-            void startRunStream(threadId, data.run_id, '0-0')
+            void startRunStream(threadId, eventPayload.run_id, '0-0')
           }
         } else if (event === 'cancelled' || event === 'rejected' || event === 'failed') {
           entry.status = event

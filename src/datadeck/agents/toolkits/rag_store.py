@@ -18,7 +18,6 @@ from __future__ import annotations
 import math
 import os
 import re
-import uuid
 from threading import RLock
 from typing import Any
 
@@ -32,21 +31,28 @@ QDRANT_URL = os.getenv("DATADECK_QDRANT_URL", "http://localhost:6333")
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 80) -> list[str]:
     """中文友好切片：按段落聚合到 ~chunk_size 字符，相邻块重叠 overlap。"""
+    if chunk_size <= 0 or overlap < 0 or overlap >= chunk_size:
+        raise ValueError("chunk_size 必须大于 0，overlap 必须位于 [0, chunk_size) 内")
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     chunks: list[str] = []
     buffer = ""
     for para in paragraphs:
-        # 超长段落硬切
+        # 超长段落硬切；每个后续片段保留前一片段的尾部 overlap。
         while len(para) > chunk_size:
             chunks.append(para[:chunk_size])
             para = para[chunk_size - overlap:]
-        if len(buffer) + len(para) + 1 <= chunk_size:
-            buffer = f"{buffer}\n{para}".strip()
+        candidate = f"{buffer}\n{para}".strip() if buffer else para
+        if len(candidate) <= chunk_size:
+            buffer = candidate
         else:
             if buffer:
                 chunks.append(buffer)
-            buffer = para[-overlap:] and para or para  # 保留尾部重叠
-            buffer = para
+                buffer = f"{buffer[-overlap:]}\n{para}".strip() if overlap else para
+            else:
+                buffer = para
+            if len(buffer) > chunk_size:
+                chunks.append(buffer[:chunk_size])
+                buffer = buffer[chunk_size - overlap:]
     if buffer:
         chunks.append(buffer)
     return chunks
@@ -54,7 +60,6 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 80) -> list[str]
 
 # ── BM25（本地，无外部依赖） ───────────────────────────────
 
-_CJK_RE = re.compile(r"[\u4e00-\u9fff]|[a-zA-Z0-9]+")
 _TOKEN_RE = re.compile(r"[\u4e00-\u9fff]|[a-zA-Z0-9_]+")
 
 def tokenize(text: str) -> list[str]:
@@ -79,11 +84,14 @@ class BM25Index:
         )
         return self
 
-    def search(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
+    def search(self, query: str, top_k: int = 10,
+               allowed_ids: set[str] | None = None) -> list[tuple[str, float]]:
         q_terms = tokenize(query)
         scores: dict[str, float] = {}
         N = len(self._docs)
         for d in self._docs:
+            if allowed_ids is not None and d["id"] not in allowed_ids:
+                continue
             tf: dict[str, int] = {}
             for t in d["terms"]:
                 tf[t] = tf.get(t, 0) + 1
@@ -184,16 +192,17 @@ def _qdrant_client():
     return QdrantClient(url=QDRANT_URL, timeout=10)
 
 
-def ensure_collection() -> bool:
+def ensure_collection(collection_name: str | None = None) -> bool:
     if not embedding_configured():
         return False
     try:
         client = _qdrant_client()
-        if not client.collection_exists(COLLECTION):
+        collection_name = collection_name or COLLECTION
+        if not client.collection_exists(collection_name):
             from qdrant_client.models import Distance, VectorParams
 
             client.create_collection(
-                collection_name=COLLECTION,
+                collection_name=collection_name,
                 vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
             )
         return True
@@ -202,13 +211,56 @@ def ensure_collection() -> bool:
         return False
 
 
-def add_document(doc_id: str, title: str, content: str, metadata: dict | None = None) -> dict[str, Any]:
+def _collection_name(collection_name: str | None = None) -> str:
+    return str(collection_name or COLLECTION)
+
+
+def _store_key(collection_name: str, chunk_id: str) -> str:
+    return f"{collection_name}:{chunk_id}"
+
+
+def _remove_bm25_document(collection_name: str, doc_id: str) -> int:
+    with _bm25_lock:
+        removed = [
+            key for key, chunk in _chunk_store.items()
+            if key.startswith(f"{collection_name}:") and chunk.get("doc_id") == doc_id
+        ]
+        for key in removed:
+            _chunk_store.pop(key, None)
+        if removed:
+            _bm25_cache.pop(f"{collection_name}:all", None)
+        return len(removed)
+
+
+def _delete_qdrant_document(collection_name: str, doc_id: str) -> bool | None:
+    if not embedding_configured() or not ensure_collection(collection_name):
+        return None
+    try:
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+        _qdrant_client().delete(
+            collection_name=collection_name,
+            points_selector=Filter(
+                must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
+            ),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Qdrant 删除失败: {str(exc)[:200]}")
+        return False
+
+
+def add_document(
+    doc_id: str, title: str, content: str, metadata: dict | None = None,
+    collection_name: str | None = None,
+) -> dict[str, Any]:
     """文档入库：切片 → embedding → Qdrant upsert + BM25 内存索引重建。"""
+    collection_name = _collection_name(collection_name)
     chunks = chunk_text(content)
     if not chunks:
         return {"ok": False, "error": "文档内容为空"}
 
-    use_vector = embedding_configured() and ensure_collection()
+    use_vector = embedding_configured() and ensure_collection(collection_name)
     points: list = []
     vectors = embed_texts(chunks) if use_vector else None
 
@@ -217,18 +269,22 @@ def add_document(doc_id: str, title: str, content: str, metadata: dict | None = 
 
         for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
             points.append(PointStruct(
-                id=str(uuid.uuid4()),
+                id=f"{doc_id}#c{i}",
                 vector=vec,
                 payload={
                     "doc_id": doc_id, "chunk_index": i, "title": title,
                     "content": chunk, **(metadata or {}),
                 },
             ))
-        _qdrant_client().upsert(collection_name=COLLECTION, points=points)
+        _delete_qdrant_document(collection_name, doc_id)
+        _qdrant_client().upsert(collection_name=collection_name, points=points)
+    elif use_vector:
+        # embedding 失败时也移除旧版本，避免返回已经过期的向量结果。
+        _delete_qdrant_document(collection_name, doc_id)
 
-    # BM25 同步登记（增量：只加本批 chunk，不重建全库）
+    _remove_bm25_document(collection_name, doc_id)
     for i, chunk in enumerate(chunks):
-        _register_chunk(f"{doc_id}#c{i}", {
+        _register_chunk(collection_name, f"{doc_id}#c{i}", {
             "doc_id": doc_id, "chunk_index": i, "title": title, "content": chunk,
             **(metadata or {}),
         })
@@ -243,38 +299,20 @@ def add_document(doc_id: str, title: str, content: str, metadata: dict | None = 
     }
 
 
-def delete_document(doc_id: str) -> dict[str, Any]:
+def delete_document(doc_id: str, collection_name: str | None = None) -> dict[str, Any]:
     """增量删除：Qdrant 按 payload.doc_id 过滤删除 + BM25 摘除。"""
-    with _bm25_lock:
-        removed_bm25 = [cid for cid, chunk in _chunk_store.items() if chunk.get("doc_id") == doc_id]
-        for cid in removed_bm25:
-            _chunk_store.pop(cid, None)
-        if removed_bm25:
-            _bm25_cache.pop(f"{COLLECTION}:all", None)
-
-    qdrant_ok = None
-    if embedding_configured() and ensure_collection():
-        try:
-            from qdrant_client.models import Filter, FieldCondition, MatchValue
-
-            _qdrant_client().delete(
-                collection_name=COLLECTION,
-                points_selector=Filter(
-                    must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
-                ),
-            )
-            qdrant_ok = True
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"Qdrant 删除失败: {str(exc)[:200]}")
-            qdrant_ok = False
+    collection_name = _collection_name(collection_name)
+    removed_bm25 = _remove_bm25_document(collection_name, doc_id)
+    qdrant_ok = _delete_qdrant_document(collection_name, doc_id)
 
     return {
         "ok": True, "doc_id": doc_id,
-        "bm25_removed": len(removed_bm25), "qdrant_deleted": qdrant_ok,
+        "bm25_removed": removed_bm25, "qdrant_deleted": qdrant_ok,
     }
 
 
-def _qdrant_search(query: str, top_k: int = 10, domain: str | None = None) -> list[dict[str, Any]]:
+def _qdrant_search(query: str, top_k: int = 10, domain: str | None = None,
+                   collection_name: str | None = None) -> list[dict[str, Any]]:
     try:
         qvec = embed_texts([query])
         if not qvec:
@@ -287,13 +325,15 @@ def _qdrant_search(query: str, top_k: int = 10, domain: str | None = None) -> li
                 must=[FieldCondition(key="domain", match=MatchValue(value=domain))]
             )
         res = _qdrant_client().query_points(
-            collection_name=COLLECTION, query=qvec[0], limit=top_k,
+            collection_name=_collection_name(collection_name), query=qvec[0], limit=top_k,
             query_filter=query_filter,
         )
         return [
             {
                 "id": str(p.id),
+                "chunk_id": str(p.id),
                 "title": p.payload.get("title", ""),
+                "filename": p.payload.get("filename", p.payload.get("title", "")),
                 "content": p.payload.get("content", ""),
                 "doc_id": p.payload.get("doc_id", ""),
                 "score": p.score,
@@ -324,53 +364,92 @@ _bm25_cache: dict[str, BM25Index] = {}
 _bm25_lock = RLock()
 
 
-def _bm25_search(query: str, top_k: int = 10) -> list[tuple[str, dict]]:
-    hits = _bm25_all_index().search(query, top_k)
+def _bm25_search(query: str, top_k: int = 10, domain: str | None = None,
+                 collection_name: str | None = None) -> list[tuple[str, dict]]:
+    collection_name = _collection_name(collection_name)
     with _bm25_lock:
-        return [(cid, dict(_chunk_store[cid])) for cid, _ in hits if cid in _chunk_store]
+        allowed = {
+            key for key, payload in _chunk_store.items()
+            if key.startswith(f"{collection_name}:")
+            and (not domain or payload.get("domain") == domain)
+        }
+    hits = _bm25_all_index(collection_name).search(query, top_k, allowed_ids=allowed)
+    with _bm25_lock:
+        prefix = f"{collection_name}:"
+        return [
+            (cid[len(prefix):], dict(_chunk_store[cid]))
+            for cid, _ in hits if cid in _chunk_store and cid.startswith(prefix)
+        ]
 
 
 _chunk_store: dict[str, dict] = {}
 
 
-def _bm25_all_index() -> BM25Index:
-    key = f"{COLLECTION}:all"
+def _bm25_all_index(collection_name: str | None = None) -> BM25Index:
+    collection_name = _collection_name(collection_name)
+    key = f"{collection_name}:all"
     with _bm25_lock:
         if key in _bm25_cache:
             return _bm25_cache[key]
         index = BM25Index()
         for cid, payload in _chunk_store.items():
+            if not cid.startswith(f"{collection_name}:"):
+                continue
             title = payload.get("title", "")
             index.add(cid, f"{title}\n{payload.get('content', '')}")
         _bm25_cache[key] = index.build()
         return _bm25_cache[key]
 
 
-def _register_chunk(chunk_id: str, payload: dict) -> None:
+def _register_chunk(collection_name: str, chunk_id: str, payload: dict) -> None:
     """add_document 时同步登记 BM25 索引（进程内）。"""
     with _bm25_lock:
-        _chunk_store[chunk_id] = payload
-        _bm25_cache.pop(f"{COLLECTION}:all", None)
+        _chunk_store[_store_key(collection_name, chunk_id)] = payload
+        _bm25_cache.pop(f"{collection_name}:all", None)
 
 
-def search(query: str, top_k: int = 5, domain: str | None = None) -> dict[str, Any]:
+def clear_bm25_collection(collection_name: str | None = None) -> int:
+    """清空一个知识库的 BM25 缓存，供启动重建或热重建使用。"""
+    prefix = f"{_collection_name(collection_name)}:"
+    with _bm25_lock:
+        removed = [key for key in _chunk_store if key.startswith(prefix)]
+        for key in removed:
+            _chunk_store.pop(key, None)
+        _bm25_cache.pop(f"{prefix[:-1]}:all", None)
+        return len(removed)
+
+
+def register_document_chunks(collection_name: str, doc_id: str, title: str,
+                             chunks: list[str], metadata: dict | None = None) -> None:
+    """供宿主持久化知识库同步关键词索引；不依赖平台数据库。"""
+    _remove_bm25_document(collection_name, doc_id)
+    for i, chunk in enumerate(chunks):
+        _register_chunk(collection_name, f"{doc_id}#c{i}", {
+            "doc_id": doc_id, "chunk_index": i, "title": title,
+            "content": chunk, **(metadata or {}),
+        })
+
+
+def search(query: str, top_k: int = 5, domain: str | None = None,
+           collection_name: str | None = None) -> dict[str, Any]:
     """混合检索：向量 + BM25 → RRF → rerank（可选）；domain 业务域过滤（可选）。"""
-    if not _chunk_store and not embedding_configured():
+    collection_name = _collection_name(collection_name)
+    top_k = min(max(int(top_k), 1), 20)
+    with _bm25_lock:
+        has_keyword_docs = any(k.startswith(f"{collection_name}:") for k in _chunk_store)
+    if not has_keyword_docs and not embedding_configured():
         return {
             "ok": True, "results": [], "strategy": "empty",
             "note": "知识库为空且未配置 embedding，请先录入文档（POST /api/rag/documents）。",
         }
 
     vector_hits = (
-        _qdrant_search(query, top_k=max(top_k * 2, 10), domain=domain)
+        _qdrant_search(query, top_k=max(top_k * 2, 10), domain=domain,
+                       collection_name=collection_name)
         if embedding_configured() else []
     )
-    bm25_hits = _bm25_search(query, top_k=max(top_k * 2, 10))
-    if domain:
-        bm25_hits = [
-            (cid, doc) for cid, doc in bm25_hits
-            if doc.get("domain") == domain
-        ]
+    bm25_hits = _bm25_search(query, top_k=max(top_k * 2, 10), domain=domain,
+                             collection_name=collection_name)
     fused = _rrf_fuse(vector_hits, bm25_hits, top_k=top_k * 2)
 
     if not fused:
@@ -387,8 +466,10 @@ def search(query: str, top_k: int = 5, domain: str | None = None) -> dict[str, A
     results = [
         {
             "title": h.get("title", ""),
+            "filename": h.get("filename", h.get("title", "")),
             "content": h.get("content", ""),
             "doc_id": h.get("doc_id", ""),
+            "chunk_id": h.get("chunk_id", h.get("id", "")),
             "score": round(float(h.get("score") or h.get("rrf") or 0), 4),
         }
         for h in fused[:top_k]

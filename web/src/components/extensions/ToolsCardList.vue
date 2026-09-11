@@ -130,9 +130,27 @@ const tools = ref([])
 const currentTool = ref(null)
 const detailVisible = ref(false)
 
-const categories = ['buildin', 'knowledge', 'mysql', 'debug']
-const categoryLabels = { buildin: '内置工具', knowledge: '知识库', mysql: 'MySQL', debug: '调试' }
-const categoryColors = { buildin: 'blue', knowledge: 'purple', mysql: 'green', debug: 'orange' }
+const categories = ['buildin', 'data', 'sql', 'filesystem', 'knowledge', 'platform', 'mysql', 'debug']
+const categoryLabels = {
+  buildin: '内置工具',
+  data: '数据工具',
+  sql: 'SQL 工具',
+  filesystem: '工作区文件',
+  knowledge: '知识库',
+  platform: '平台能力',
+  mysql: 'MySQL',
+  debug: '调试'
+}
+const categoryColors = {
+  buildin: 'blue',
+  data: 'green',
+  sql: 'cyan',
+  filesystem: 'gold',
+  knowledge: 'purple',
+  platform: 'volcano',
+  mysql: 'green',
+  debug: 'orange'
+}
 
 const getToolSlug = (tool) => tool?.slug || tool?.id || ''
 

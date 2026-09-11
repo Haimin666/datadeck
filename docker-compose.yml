@@ -9,6 +9,7 @@ services:
       - path: .env.docker
         required: false
     environment:
+      DATADECK_DATA_ROOT: /app/data
       DATABASE_URL: postgresql+asyncpg://datadeck:${POSTGRES_PASSWORD:-datadeck_password}@postgres:5432/datadeck
       DATADECK_SQL_DSN: postgresql://datadeck:${POSTGRES_PASSWORD:-datadeck_password}@postgres:5432/datadeck
       DATADECK_QDRANT_URL: http://qdrant:6333
@@ -23,6 +24,7 @@ services:
       redis:
         condition: service_healthy
     volumes:
+      - ./data:/app/data:Z
       - ./uploads:/app/uploads:Z
       - ./server/uploads:/app/server/uploads:Z
     healthcheck:

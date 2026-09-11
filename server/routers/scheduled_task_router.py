@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import uuid
-import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -12,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.db import get_db
 from server.deps import get_admin_user
 from server.models import Agent, Project, ScheduledTask, User
+from server.utils.cron import validate_cron_expression
 
 scheduled_tasks = APIRouter(prefix="/scheduled-tasks", tags=["scheduled-tasks"])
 
@@ -26,10 +26,7 @@ class ScheduledTaskIn(BaseModel):
 
 
 def _validate_cron(value: str) -> str:
-    fields = value.split()
-    if len(fields) != 5 or any(not re.fullmatch(r"[0-9*/,\-]+", item) for item in fields):
-        raise ValueError("Cron 必须是 5 段数字表达式，例如：0 9 * * *")
-    return value
+    return validate_cron_expression(value)
 
 
 async def _get(db: AsyncSession, uid: str, task_id: str) -> ScheduledTask:

@@ -113,8 +113,10 @@ class SkillsMiddleware(AgentMiddleware):
         active_mcp_tools = []
         if activated_tool_names:
             enabled_tools = [t for t in get_all_tool_instances() if t.name in activated_tool_names]
-        if deps_bundle["mcps"]:
-            active_mcp_tools = await self._get_mcp_tools_from_context(runtime_context, extra_mcps=deps_bundle["mcps"])
+        configured_mcps = normalize_string_list(getattr(runtime_context, "mcps", None))
+        if configured_mcps or deps_bundle["mcps"]:
+            active_mcp_tools = await self._get_mcp_tools_from_context(
+                runtime_context, extra_mcps=[*configured_mcps, *deps_bundle["mcps"]])
         active_mcp_tools_by_name = {}
         for tool in active_mcp_tools:
             existing = active_mcp_tools_by_name.get(tool.name)
@@ -159,11 +161,9 @@ class SkillsMiddleware(AgentMiddleware):
         """从上下文配置中获取 MCP 工具列表"""
         import asyncio
 
-        # 显式 MCP 已在 Graph 基础工具中注册，这里只加载 Skill 新增依赖。
-        configured_mcps = set(normalize_string_list(getattr(context, "mcps", None)))
         all_mcp_names: list[str] = []
         for server_name in extra_mcps or []:
-            if isinstance(server_name, str) and server_name not in configured_mcps:
+            if isinstance(server_name, str):
                 all_mcp_names.append(server_name)
 
         # 去重

@@ -18,6 +18,7 @@ export * from './user_config_api' // 用户配置 API
 export * from './auth_api' // 认证与用户管理 API
 export * from './project_api' // Project API
 export * from './workspace_api' // Workspace API
+export * from './metric_api' // Ossie 指标审核 API
 
 // 导出基础工具函数
 export {

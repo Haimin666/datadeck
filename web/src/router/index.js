@@ -108,6 +108,17 @@ const router = createRouter({
       }]
     },
     {
+      path: '/metrics',
+      name: 'metrics',
+      component: AppLayout,
+      children: [{
+        path: '',
+        name: 'MetricsComp',
+        component: () => import('../views/MetricRegistryView.vue'),
+        meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+      }]
+    },
+    {
       path: '/dashboard',
       name: 'dashboard',
       component: AppLayout,

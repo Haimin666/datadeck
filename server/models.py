@@ -144,6 +144,34 @@ class KnowledgeDocument(Base):
         }
 
 
+class KnowledgeChunk(Base):
+    """持久化文档切片，供重启后的关键词检索和索引重建使用。"""
+
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        UniqueConstraint("document_id", "chunk_index", name="uq_knowledge_chunks_document_index"),
+        Index("ix_knowledge_chunks_kb_document", "kb_id", "document_id"),
+    )
+
+    id = Column(String(128), primary_key=True)
+    kb_id = Column(String(64), ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False, index=True)
+    document_id = Column(String(64), ForeignKey("knowledge_documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    metadata_json = Column(JSON, nullable=False, default=dict, server_default="{}")
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "kb_id": self.kb_id,
+            "document_id": self.document_id,
+            "chunk_index": self.chunk_index,
+            "content": self.content,
+            "metadata": self.metadata_json or {},
+        }
+
+
 # ── Project ───────────────────────────────────────────────
 class Project(Base):
     __tablename__ = "projects"
@@ -621,9 +649,77 @@ class UserConfig(Base):
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
 
 
+class AgentMaterial(Base):
+    """DataAgent 已整理物料的持久化快照（原文/代码/OMD/Ossie 均可追溯）。"""
+    __tablename__ = "agent_materials"
+    __table_args__ = (
+        UniqueConstraint("source_type", "source_id", name="uq_agent_materials_source"),
+        Index("ix_agent_materials_type_layer", "source_type", "layer"),
+    )
+
+    id = Column(String(128), primary_key=True)
+    source_type = Column(String(32), nullable=False)  # wiki/business_doc/code/omd/ossie
+    source_id = Column(String(512), nullable=False)
+    title = Column(String(512), nullable=False, default="")
+    content = Column(Text, nullable=False, default="")
+    metadata_json = Column(JSON, nullable=False, default=dict, server_default="{}")
+    layer = Column(String(16), nullable=False, default="cold", server_default="cold")
+    status = Column(String(32), nullable=False, default="active", server_default="active")
+    content_hash = Column(String(64), nullable=False)
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "source_type": self.source_type, "source_id": self.source_id,
+            "title": self.title, "content": self.content, "metadata": self.metadata_json or {},
+            "layer": self.layer, "status": self.status,
+            "content_hash": self.content_hash,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class MetricRegistry(Base):
+    """Ossie 指标注册表与审核状态。"""
+    __tablename__ = "metric_registry"
+    __table_args__ = (Index("ix_metric_registry_domain", "domain"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    canonical_name = Column(String(128), nullable=False, unique=True)
+    aliases = Column(JSON, nullable=False, default=list)
+    definition = Column(Text, nullable=False)
+    formula = Column(Text, nullable=True)
+    unit = Column(String(32), nullable=True)
+    owner = Column(String(64), nullable=True)
+    domain = Column(String(64), nullable=True)
+    ossie_name = Column(String(160), nullable=True)
+    ossie_expression = Column(JSON, nullable=True)
+    datatype = Column(String(32), nullable=True)
+    ai_context = Column(JSON, nullable=False, default=dict, server_default="{}")
+    source_evidence = Column(JSON, nullable=False, default=list, server_default="[]")
+    status = Column(String(32), nullable=False, default="candidate", server_default="candidate")
+    conflict_status = Column(String(32), nullable=False, default="none", server_default="none")
+    conflict_details = Column(JSON, nullable=False, default=list, server_default="[]")
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "canonical_name": self.canonical_name, "aliases": self.aliases or [],
+            "definition": self.definition, "formula": self.formula, "unit": self.unit,
+            "owner": self.owner, "domain": self.domain, "ossie_name": self.ossie_name,
+            "ossie_expression": self.ossie_expression, "datatype": self.datatype,
+            "ai_context": self.ai_context or {}, "source_evidence": self.source_evidence or [],
+            "status": self.status, "conflict_status": self.conflict_status,
+            "conflict_details": self.conflict_details or [],
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 # 扩展模型仍由功能模块实现行为，但统一从此处注册/导出，避免应用入口维护隐式模型清单。
 # 这些导入放在基础模型声明之后，避免扩展模块反向导入 Base 时形成循环。
 from server.services.attachment_service import ThreadAttachment  # noqa: E402,F401
 from server.services.eval_service import EvaluationCase, EvaluationRun  # noqa: E402,F401
-from server.services.metric_registry import MetricRegistry  # noqa: E402,F401
 from server.services.pg_memory_store import AgentMemory  # noqa: E402,F401

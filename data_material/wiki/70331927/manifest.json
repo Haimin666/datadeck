@@ -1,0 +1,328 @@
+{
+  "root_id": "70331927",
+  "base_url": "http://wiki.corp.shiqiao.com",
+  "collected_at": "2026-09-10T18:40:03.060498+00:00",
+  "page_count": 32,
+  "pages": [
+    {
+      "id": "70331927",
+      "title": "征信",
+      "level": 0,
+      "parent_id": null,
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=70331927",
+      "status": "ok",
+      "content_length": 0,
+      "path": "data_material/wiki/70331927/70331927_征信.md"
+    },
+    {
+      "id": "97989133",
+      "title": "个人/企业征信迁移 新老系统融合问题",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=97989133",
+      "status": "ok",
+      "content_length": 3132,
+      "path": "data_material/wiki/70331927/97989133_个人_企业征信迁移 新老系统融合问题.md"
+    },
+    {
+      "id": "80892917",
+      "title": "人行删除报文流程",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=80892917",
+      "status": "ok",
+      "content_length": 396,
+      "path": "data_material/wiki/70331927/80892917_人行删除报文流程.md"
+    },
+    {
+      "id": "132481193",
+      "title": "人行评分复盘",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=132481193",
+      "status": "ok",
+      "content_length": 0,
+      "path": "data_material/wiki/70331927/132481193_人行评分复盘.md"
+    },
+    {
+      "id": "132481200",
+      "title": "2026-04-01反馈",
+      "level": 2,
+      "parent_id": "132481193",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=132481200",
+      "status": "ok",
+      "content_length": 353,
+      "path": "data_material/wiki/70331927/132481200_2026-04-01反馈.md"
+    },
+    {
+      "id": "78283394",
+      "title": "小贷重构到hive",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=78283394",
+      "status": "ok",
+      "content_length": 4647,
+      "path": "data_material/wiki/70331927/78283394_小贷重构到hive.md"
+    },
+    {
+      "id": "154568176",
+      "title": "征信个人呆账短信推送流程",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=154568176",
+      "status": "ok",
+      "content_length": 2235,
+      "path": "data_material/wiki/70331927/154568176_征信个人呆账短信推送流程.md"
+    },
+    {
+      "id": "75291615",
+      "title": "征信小贷ETC上报规则修改-20230530",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=75291615",
+      "status": "ok",
+      "content_length": 446,
+      "path": "data_material/wiki/70331927/75291615_征信小贷ETC上报规则修改-20230530.md"
+    },
+    {
+      "id": "75297427",
+      "title": "征信小贷增加反担保人信息上报-20230615",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=75297427",
+      "status": "ok",
+      "content_length": 3592,
+      "path": "data_material/wiki/70331927/75297427_征信小贷增加反担保人信息上报-20230615.md"
+    },
+    {
+      "id": "75283096",
+      "title": "征信小贷重新上报",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=75283096",
+      "status": "ok",
+      "content_length": 14348,
+      "path": "data_material/wiki/70331927/75283096_征信小贷重新上报.md"
+    },
+    {
+      "id": "70342056",
+      "title": "征信报送规则",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=70342056",
+      "status": "ok",
+      "content_length": 1094,
+      "path": "data_material/wiki/70331927/70342056_征信报送规则.md"
+    },
+    {
+      "id": "104439480",
+      "title": "征信数据",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=104439480",
+      "status": "ok",
+      "content_length": 0,
+      "path": "data_material/wiki/70331927/104439480_征信数据.md"
+    },
+    {
+      "id": "104439483",
+      "title": "基础信息数据",
+      "level": 2,
+      "parent_id": "104439480",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=104439483",
+      "status": "ok",
+      "content_length": 3508,
+      "path": "data_material/wiki/70331927/104439483_基础信息数据.md"
+    },
+    {
+      "id": "70331975",
+      "title": "征信数据库",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=70331975",
+      "status": "ok",
+      "content_length": 2965,
+      "path": "data_material/wiki/70331927/70331975_征信数据库.md"
+    },
+    {
+      "id": "70332113",
+      "title": "征信数据调整",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=70332113",
+      "status": "ok",
+      "content_length": 2484,
+      "path": "data_material/wiki/70331927/70332113_征信数据调整.md"
+    },
+    {
+      "id": "70332050",
+      "title": "征信文档",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=70332050",
+      "status": "ok",
+      "content_length": 0,
+      "path": "data_material/wiki/70331927/70332050_征信文档.md"
+    },
+    {
+      "id": "155752409",
+      "title": "征信监控",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=155752409",
+      "status": "ok",
+      "content_length": 6035,
+      "path": "data_material/wiki/70331927/155752409_征信监控.md"
+    },
+    {
+      "id": "87742812",
+      "title": "征信邮箱备份",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=87742812",
+      "status": "ok",
+      "content_length": 16,
+      "path": "data_material/wiki/70331927/87742812_征信邮箱备份.md"
+    },
+    {
+      "id": "70331955",
+      "title": "征信问题",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=70331955",
+      "status": "ok",
+      "content_length": 3475,
+      "path": "data_material/wiki/70331927/70331955_征信问题.md"
+    },
+    {
+      "id": "155753638",
+      "title": "征信问题反馈",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=155753638",
+      "status": "ok",
+      "content_length": 161,
+      "path": "data_material/wiki/70331927/155753638_征信问题反馈.md"
+    },
+    {
+      "id": "70339715",
+      "title": "征信问题处理记录-吕凯旋",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=70339715",
+      "status": "ok",
+      "content_length": 14573,
+      "path": "data_material/wiki/70331927/70339715_征信问题处理记录-吕凯旋.md"
+    },
+    {
+      "id": "70339682",
+      "title": "征信问题处理记录-王增绪",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=70339682",
+      "status": "ok",
+      "content_length": 31115,
+      "path": "data_material/wiki/70331927/70339682_征信问题处理记录-王增绪.md"
+    },
+    {
+      "id": "75285456",
+      "title": "2征信问题处理记录-王增绪",
+      "level": 2,
+      "parent_id": "70339682",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=75285456",
+      "status": "ok",
+      "content_length": 44626,
+      "path": "data_material/wiki/70331927/75285456_2征信问题处理记录-王增绪.md"
+    },
+    {
+      "id": "75282020",
+      "title": "来款核销问题",
+      "level": 2,
+      "parent_id": "70339682",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=75282020",
+      "status": "ok",
+      "content_length": 195,
+      "path": "data_material/wiki/70331927/75282020_来款核销问题.md"
+    },
+    {
+      "id": "70336011",
+      "title": "征信问题处理记录-赵晨旭",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=70336011",
+      "status": "ok",
+      "content_length": 68954,
+      "path": "data_material/wiki/70331927/70336011_征信问题处理记录-赵晨旭.md"
+    },
+    {
+      "id": "70351842",
+      "title": "问题点确认",
+      "level": 2,
+      "parent_id": "70336011",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=70351842",
+      "status": "ok",
+      "content_length": 1406,
+      "path": "data_material/wiki/70331927/70351842_问题点确认.md"
+    },
+    {
+      "id": "70340268",
+      "title": "征信问题处理记录-陈志田",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=70340268",
+      "status": "ok",
+      "content_length": 75534,
+      "path": "data_material/wiki/70331927/70340268_征信问题处理记录-陈志田.md"
+    },
+    {
+      "id": "130820107",
+      "title": "狮桥个人上报流程",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=130820107",
+      "status": "ok",
+      "content_length": 2276,
+      "path": "data_material/wiki/70331927/130820107_狮桥个人上报流程.md"
+    },
+    {
+      "id": "75278645",
+      "title": "狮桥企业上报流程",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=75278645",
+      "status": "ok",
+      "content_length": 2223,
+      "path": "data_material/wiki/70331927/75278645_狮桥企业上报流程.md"
+    },
+    {
+      "id": "126257735",
+      "title": "需求管理",
+      "level": 1,
+      "parent_id": "70331927",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=126257735",
+      "status": "ok",
+      "content_length": 0,
+      "path": "data_material/wiki/70331927/126257735_需求管理.md"
+    },
+    {
+      "id": "126257739",
+      "title": "卓远",
+      "level": 2,
+      "parent_id": "126257735",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=126257739",
+      "status": "ok",
+      "content_length": 1034,
+      "path": "data_material/wiki/70331927/126257739_卓远.md"
+    },
+    {
+      "id": "126257737",
+      "title": "狮桥个人/企业",
+      "level": 2,
+      "parent_id": "126257735",
+      "url": "http://wiki.corp.shiqiao.com/pages/viewpage.action?pageId=126257737",
+      "status": "ok",
+      "content_length": 639,
+      "path": "data_material/wiki/70331927/126257737_狮桥个人_企业.md"
+    }
+  ]
+}

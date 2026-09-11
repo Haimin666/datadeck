@@ -6,10 +6,10 @@ import os
 import uuid
 from pathlib import PurePath
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete as sa_delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.models import KnowledgeBase, KnowledgeDocument
+from server.models import KnowledgeBase, KnowledgeChunk, KnowledgeDocument
 from server.utils.datetime_utils import utc_now_naive
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".markdown", ".csv", ".json"}
@@ -79,6 +79,55 @@ async def create_knowledge_base(db: AsyncSession, uid: str, name: str, descripti
     return item
 
 
+async def rebuild_rag_indexes(db: AsyncSession) -> int:
+    """从数据库恢复文本知识库的 BM25 索引，避免应用重启后只能查到空缓存。"""
+    from datadeck.agents.toolkits.rag_store import clear_bm25_collection, register_document_chunks
+
+    rows = (await db.execute(
+        select(KnowledgeBase.collection_name, KnowledgeDocument.id,
+               KnowledgeDocument.filename, KnowledgeChunk.chunk_index,
+               KnowledgeChunk.content)
+        .join(KnowledgeDocument, KnowledgeDocument.kb_id == KnowledgeBase.id)
+        .join(KnowledgeChunk, KnowledgeChunk.document_id == KnowledgeDocument.id)
+        .order_by(KnowledgeDocument.id, KnowledgeChunk.chunk_index)
+    )).all()
+    grouped: dict[tuple[str, str, str], list[str]] = {}
+    collection_names = set((await db.execute(
+        select(KnowledgeBase.collection_name)
+    )).scalars().all())
+    for collection_name in collection_names:
+        clear_bm25_collection(collection_name)
+    for collection_name, document_id, filename, _chunk_index, content in rows:
+        grouped.setdefault((collection_name, document_id, filename), []).append(content)
+    for (collection_name, document_id, filename), chunks in grouped.items():
+        register_document_chunks(collection_name, document_id, filename, chunks)
+
+    # 兼容 0006 迁移前已存在、但尚未持久化 chunk 的文档。
+    document_rows = (await db.execute(
+        select(KnowledgeBase.collection_name, KnowledgeDocument.kb_id, KnowledgeDocument.id,
+               KnowledgeDocument.filename, KnowledgeDocument.content)
+        .join(KnowledgeDocument, KnowledgeDocument.kb_id == KnowledgeBase.id)
+    )).all()
+    for collection_name, kb_id, document_id, filename, content in document_rows:
+        key = (collection_name, document_id, filename)
+        if key not in grouped:
+            chunks = _chunks(content or "")
+            if chunks:
+                db.add_all([
+                    KnowledgeChunk(
+                        id=f"{document_id}#c{i}",
+                        kb_id=kb_id,
+                        document_id=document_id,
+                        chunk_index=i,
+                        content=chunk,
+                    )
+                    for i, chunk in enumerate(chunks)
+                ])
+                register_document_chunks(collection_name, document_id, filename, chunks)
+    await db.flush()
+    return len(document_rows)
+
+
 async def list_documents(db: AsyncSession, kb_id: str, uid: str) -> list[dict]:
     await get_knowledge_base(db, uid, kb_id)
     items = (await db.execute(
@@ -108,9 +157,11 @@ async def _index_qdrant(kb: KnowledgeBase, document: KnowledgeDocument, chunks: 
     client.upsert(
         collection_name=kb.collection_name,
         points=[PointStruct(
-            id=str(uuid.uuid4()), vector=vector,
-            payload={"document_id": document.id, "filename": document.filename, "content": chunk},
-        ) for vector, chunk in zip(vectors, chunks, strict=True)],
+            id=f"{document.id}#c{i}", vector=vector,
+            payload={"document_id": document.id, "doc_id": document.id,
+                     "filename": document.filename, "title": document.filename,
+                     "content": chunk},
+        ) for i, (vector, chunk) in enumerate(zip(vectors, chunks, strict=True))],
     )
     return True
 
@@ -128,12 +179,22 @@ async def add_document(db: AsyncSession, uid: str, kb_id: str, filename: str, co
     )
     db.add(document)
     await db.flush()
+    await db.execute(sa_delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id))
+    db.add_all([
+        KnowledgeChunk(
+            id=f"{document.id}#c{i}", kb_id=kb.id, document_id=document.id,
+            chunk_index=i, content=chunk,
+        )
+        for i, chunk in enumerate(chunks)
+    ])
     try:
         vector_indexed = await _index_qdrant(kb, document, chunks)
         document.status = "indexed" if vector_indexed else "indexed_keyword"
     except Exception as exc:  # noqa: BLE001
         document.status = "indexed_keyword"
         document.error_message = f"向量索引失败，已保留关键词检索：{str(exc)[:300]}"
+    from datadeck.agents.toolkits.rag_store import register_document_chunks
+    register_document_chunks(kb.collection_name, document.id, document.filename, chunks)
     document.updated_at = utc_now_naive()
     await db.flush()
     return document
@@ -161,6 +222,8 @@ async def delete_document(db: AsyncSession, uid: str, kb_id: str, document_id: s
             )
     except Exception:
         pass
+    from datadeck.agents.toolkits.rag_store import delete_document as delete_rag_document
+    delete_rag_document(document.id, collection_name=kb.collection_name)
     await db.delete(document)
 
 
@@ -200,6 +263,26 @@ async def search(db: AsyncSession, uid: str, kb_id: str, query: str, top_k: int 
         except Exception:
             pass
     terms = [term.lower() for term in re.findall(r"[\w\u4e00-\u9fff]+", query)]
+    chunks = (await db.execute(
+        select(KnowledgeChunk, KnowledgeDocument.filename)
+        .join(KnowledgeDocument, KnowledgeChunk.document_id == KnowledgeDocument.id)
+        .where(KnowledgeChunk.kb_id == kb.id)
+        .order_by(KnowledgeChunk.document_id, KnowledgeChunk.chunk_index)
+    )).all()
+    if chunks:
+        ranked_chunks = sorted(
+            ((sum(text.count(term) for term in terms), chunk, filename)
+             for chunk, filename in chunks
+             for text in [chunk.content.lower()]),
+            key=lambda item: item[0], reverse=True,
+        )
+        return {"results": [
+            {"document_id": chunk.document_id, "chunk_id": chunk.id,
+             "filename": filename, "content": chunk.content[:1200], "score": score}
+            for score, chunk, filename in ranked_chunks[:top_k] if score > 0
+        ], "strategy": "keyword"}
+
+    # 兼容尚未执行 0006 迁移的旧文档。
     documents = (await db.execute(
         select(KnowledgeDocument).where(KnowledgeDocument.kb_id == kb.id)
     )).scalars().all()

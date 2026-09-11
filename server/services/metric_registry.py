@@ -11,39 +11,23 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Column, DateTime, Index, Integer, JSON, String, Text
+from sqlalchemy import select
 
 from server.db import async_session_factory
-from server.models import Base
-from server.utils.datetime_utils import utc_now_naive
-
-
-class MetricRegistry(Base):
-    __tablename__ = "metric_registry"
-    __table_args__ = (Index("ix_metric_registry_domain", "domain"),)
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    canonical_name = Column(String(128), nullable=False, unique=True)
-    aliases = Column(JSON, nullable=False, default=list)
-    definition = Column(Text, nullable=False)   # 口径定义
-    formula = Column(Text, nullable=True)        # 计算公式
-    unit = Column(String(32), nullable=True)     # 单位
-    owner = Column(String(64), nullable=True)    # 归属团队
-    domain = Column(String(64), nullable=True)   # 业务域
-    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
+from server.models import MetricRegistry
 
 
 async def resolve_alias(name: str) -> str:
     """别名消解：命中别名/官方名返回官方名，否则原样返回。"""
     async with async_session_factory() as db:
-        from sqlalchemy import text as sa_text
-
-        r = await db.execute(sa_text(
-            "SELECT canonical_name FROM metric_registry WHERE canonical_name ILIKE :n "
-            "OR :n = ANY(SELECT json_array_elements_text(aliases)) LIMIT 1"),
-            {"n": name})
-        row = r.fetchone()
-    return row[0] if row else name
+        result = await db.execute(select(MetricRegistry).where(
+            MetricRegistry.status == "approved"))
+        wanted = str(name or "").strip().casefold()
+        for item in result.scalars().all():
+            names = [item.canonical_name, item.ossie_name, *(item.aliases or [])]
+            if any(str(value or "").strip().casefold() == wanted for value in names):
+                return item.canonical_name
+    return name
 
 
 async def get_metric(canonical_name: str) -> dict | None:
@@ -51,8 +35,9 @@ async def get_metric(canonical_name: str) -> dict | None:
         from sqlalchemy import text as sa_text
 
         r = await db.execute(sa_text(
-            "SELECT canonical_name, aliases, definition, formula, unit, owner, domain "
-            "FROM metric_registry WHERE canonical_name ILIKE :n LIMIT 1"),
+            "SELECT canonical_name, aliases, definition, formula, unit, owner, domain, "
+            "ossie_name, ossie_expression, datatype, ai_context, source_evidence, status "
+            "FROM metric_registry WHERE canonical_name ILIKE :n AND status='approved' LIMIT 1"),
             {"n": canonical_name})
         row = r.fetchone()
     if not row:
@@ -60,4 +45,24 @@ async def get_metric(canonical_name: str) -> dict | None:
     return {
         "name": row[0], "aliases": row[1] or [], "definition": row[2],
         "formula": row[3], "unit": row[4], "owner": row[5], "domain": row[6],
+        "ossie_name": row[7], "ossie_expression": row[8], "datatype": row[9],
+        "ai_context": row[10] or {}, "source_evidence": row[11] or [], "status": row[12],
     }
+
+
+async def search_metrics(query: str, limit: int = 5) -> list[dict]:
+    """按官方名、别名和定义检索已审核指标，供 DataAgent 做口径识别。"""
+    needle = f"%{str(query or '').strip()}%"
+    if needle == "%%":
+        return []
+    async with async_session_factory() as db:
+        result = await db.execute(select(MetricRegistry).where(MetricRegistry.status == "approved"))
+        items = result.scalars().all()
+    matches = []
+    query_text = str(query or "").strip().casefold()
+    for item in items:
+        names = [item.canonical_name, item.ossie_name, *(item.aliases or [])]
+        haystack = " ".join(str(value or "") for value in [*names, item.definition]).casefold()
+        if query_text in haystack:
+            matches.append(item.to_dict())
+    return matches[:min(max(int(limit), 1), 20)]
