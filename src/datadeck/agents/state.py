@@ -16,6 +16,13 @@ def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[s
     return list(dict.fromkeys(existing + new))
 
 
+def merge_data_workflow(existing: dict | None, new: dict | None) -> dict:
+    """合并并行工具调用的工作流状态，避免 LangGraph 多值更新冲突。"""
+    merged = dict(existing or {})
+    merged.update(new or {})
+    return merged
+
+
 class BaseState(AgentState):
     """Shared state fields for datadeck agents."""
 
@@ -23,7 +30,7 @@ class BaseState(AgentState):
     sql_retry_attempts: int       # SqlSelfCheckMiddleware：当前轮打回次数
     sql_turn_base: int            # SqlSelfCheckMiddleware：本轮消息基线索引
     sql_validation: dict | None   # SqlSelfCheckMiddleware：最终验证状态
-    data_workflow: dict            # DataWorkflowMiddleware：数据工具前置条件
+    data_workflow: Annotated[dict, merge_data_workflow]  # DataWorkflowMiddleware：数据工具前置条件
 
 
 class AgentStatePayload(TypedDict):

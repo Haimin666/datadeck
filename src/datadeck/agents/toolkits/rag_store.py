@@ -189,7 +189,7 @@ def rerank(query: str, docs: list[dict[str, Any]]) -> list[dict[str, Any]] | Non
 def _qdrant_client():
     from qdrant_client import QdrantClient
 
-    return QdrantClient(url=QDRANT_URL, timeout=10)
+    return QdrantClient(url=QDRANT_URL, timeout=10, trust_env=False)
 
 
 def ensure_collection(collection_name: str | None = None) -> bool:

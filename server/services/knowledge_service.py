@@ -148,7 +148,7 @@ async def _index_qdrant(kb: KnowledgeBase, document: KnowledgeDocument, chunks: 
     from qdrant_client import QdrantClient
     from qdrant_client.models import Distance, PointStruct, VectorParams
 
-    client = QdrantClient(url=os.getenv("DATADECK_QDRANT_URL", "http://localhost:6333"), timeout=10)
+    client = QdrantClient(url=os.getenv("DATADECK_QDRANT_URL", "http://localhost:6333"), timeout=10, trust_env=False)
     if not client.collection_exists(kb.collection_name):
         client.create_collection(
             collection_name=kb.collection_name,
@@ -212,7 +212,7 @@ async def delete_document(db: AsyncSession, uid: str, kb_id: str, document_id: s
     try:
         from qdrant_client import QdrantClient
         from qdrant_client.models import Filter, FieldCondition, MatchValue
-        client = QdrantClient(url=os.getenv("DATADECK_QDRANT_URL", "http://localhost:6333"), timeout=10)
+        client = QdrantClient(url=os.getenv("DATADECK_QDRANT_URL", "http://localhost:6333"), timeout=10, trust_env=False)
         if client.collection_exists(kb.collection_name):
             client.delete(
                 collection_name=kb.collection_name,
@@ -231,7 +231,7 @@ async def delete_knowledge_base(db: AsyncSession, uid: str, kb_id: str) -> None:
     kb = await get_knowledge_base(db, uid, kb_id)
     try:
         from qdrant_client import QdrantClient
-        client = QdrantClient(url=os.getenv("DATADECK_QDRANT_URL", "http://localhost:6333"), timeout=10)
+        client = QdrantClient(url=os.getenv("DATADECK_QDRANT_URL", "http://localhost:6333"), timeout=10, trust_env=False)
         if client.collection_exists(kb.collection_name):
             client.delete_collection(kb.collection_name)
     except Exception:
@@ -248,7 +248,7 @@ async def search(db: AsyncSession, uid: str, kb_id: str, query: str, top_k: int 
     if embedding_configured():
         try:
             from qdrant_client import QdrantClient
-            client = QdrantClient(url=os.getenv("DATADECK_QDRANT_URL", "http://localhost:6333"), timeout=10)
+            client = QdrantClient(url=os.getenv("DATADECK_QDRANT_URL", "http://localhost:6333"), timeout=10, trust_env=False)
             if client.collection_exists(kb.collection_name):
                 vectors = embed_texts([query])
                 if vectors:
