@@ -46,6 +46,15 @@
             <User class="icon" :size="18" />
             <span>用户管理</span>
           </div>
+          <div
+            class="sider-item"
+            :class="{ activesec: activeTab === 'role' }"
+            @click="activeTab = 'role'"
+            v-if="userStore.isSuperAdmin"
+          >
+            <ShieldCheck class="icon" :size="18" />
+            <span>角色管理</span>
+          </div>
         </div>
 
         <div v-if="showStarCard" class="settings-star-card">
@@ -108,6 +117,9 @@
         >
           用户管理
         </div>
+        <div class="nav-item" :class="{ active: activeTab === 'role' }" @click="activeTab = 'role'" v-if="userStore.isSuperAdmin">
+          角色管理
+        </div>
       </div>
 
       <!-- 内容区域 -->
@@ -124,6 +136,9 @@
           <div v-show="activeTab === 'user'" v-if="userStore.isAdmin">
             <UserManagementComponent />
           </div>
+          <div v-show="activeTab === 'role'" v-if="userStore.isSuperAdmin">
+            <RoleManagementComponent />
+          </div>
 
         </div>
       </div>
@@ -138,6 +153,7 @@ import {
   CircleUser,
   ExternalLink,
   Settings,
+  ShieldCheck,
   Star,
   User,
   X
@@ -145,6 +161,7 @@ import {
 import AccountSettingsComponent from '@/components/AccountSettingsComponent.vue'
 import BasicSettingsSection from '@/components/BasicSettingsSection.vue'
 import UserManagementComponent from '@/components/UserManagementComponent.vue'
+import RoleManagementComponent from '@/components/RoleManagementComponent.vue'
 
 const props = defineProps({
   visible: {
@@ -175,6 +192,7 @@ const availableTabs = computed(() => {
   const tabs = []
   if (userStore.isLoggedIn) tabs.push('account')
   if (userStore.isAdmin) tabs.push('base', 'user')
+  if (userStore.isSuperAdmin) tabs.push('role')
   return tabs
 })
 
@@ -417,9 +435,7 @@ watch(
     min-height: 0;
 
     .model-providers-section,
-    .user-management,
-    .department-management,
-    .apikey-management {
+    .user-management {
       min-height: auto;
     }
 

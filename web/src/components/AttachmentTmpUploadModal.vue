@@ -17,7 +17,7 @@
       class="attachment-dropzone"
     >
       <p class="dropzone-title">点击或拖拽文件到此处上传</p>
-      <p class="dropzone-desc">支持任意文件格式 ≤ 5 MB；PDF 和图片可选解析为 Markdown。</p>
+      <p class="dropzone-desc">支持任意文件格式 ≤ 5 MB；文本附件可由 Agent 直接读取。</p>
     </a-upload-dragger>
 
     <div v-if="fileItems.length" class="attachment-list">
@@ -51,33 +51,8 @@
               </a-tag>
               <span>{{ formatFileSize(item.fileSize) }}</span>
               <span v-if="item.error" class="attachment-error">{{ item.error }}</span>
-              <span v-else-if="item.parseError" class="attachment-error">{{
-                item.parseError
-              }}</span>
             </div>
 
-            <div
-              v-if="item.parseSupported && item.status !== 'uploading' && item.status !== 'error'"
-              class="attachment-parse-controls"
-            >
-              <OCRSelector
-                :model-value="item.selectedParseMethod"
-                :allowed-engines="item.parseMethods"
-                :disabled="item.status === 'parsing' || confirming"
-                placeholder="选择 OCR"
-                @update:model-value="handleParseMethodChange(item.localId, $event)"
-              />
-              <a-button
-                type="primary"
-                size="small"
-                class="parse-trigger-btn"
-                :loading="item.status === 'parsing'"
-                :disabled="isParseDisabled(item)"
-                @click="handleStartParse(item.localId)"
-              >
-                解析
-              </a-button>
-            </div>
           </div>
         </div>
       </div>
@@ -90,9 +65,7 @@ import { computed, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { X } from '@lucide/vue'
 import { threadApi } from '@/apis'
-import { useConfigStore } from '@/stores/config'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
-import OCRSelector from '@/components/OCRSelector.vue'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -104,18 +77,16 @@ const props = defineProps({
 
 const emit = defineEmits(['update:open', 'added'])
 
-const DEFAULT_OCR_ENGINE = 'rapid_ocr'
-const configStore = useConfigStore()
 const fileItems = ref([])
 const confirming = ref(false)
 let localIdSeed = 0
 let consumedInitialFilesKey = 0
 
 const busy = computed(() =>
-  fileItems.value.some((item) => ['uploading', 'parsing'].includes(item.status))
+  fileItems.value.some((item) => item.status === 'uploading')
 )
 const confirmableItems = computed(() =>
-  fileItems.value.filter((item) => ['uploaded', 'parsed'].includes(item.status))
+  fileItems.value.filter((item) => item.status === 'uploaded')
 )
 const confirmDisabled = computed(() => busy.value || confirmableItems.value.length === 0)
 
@@ -133,34 +104,11 @@ const getErrorMessage = (error, fallback = '操作失败') => {
   return error?.response?.data?.detail || error?.message || fallback
 }
 
-const getDefaultParseMethod = (parseMethods) => {
-  if (!Array.isArray(parseMethods) || parseMethods.length === 0) {
-    return null
-  }
-  const configuredEngine = String(
-    configStore.config?.default_ocr_engine || DEFAULT_OCR_ENGINE
-  ).trim()
-  if (configuredEngine === 'disable' && parseMethods.includes('disable')) {
-    return configuredEngine
-  }
-  const selectableMethods = parseMethods.filter((method) => method !== 'disable')
-  if (selectableMethods.includes(configuredEngine)) {
-    return configuredEngine
-  }
-  if (selectableMethods.includes(DEFAULT_OCR_ENGINE)) {
-    return DEFAULT_OCR_ENGINE
-  }
-  return selectableMethods[0] || null
-}
-
 const normalizeTmpUpload = (response) => ({
   fileName: response.file_name,
   fileType: response.file_type,
   fileSize: response.file_size,
   objectName: response.object_name,
-  parseSupported: response.parse_supported,
-  parseMethods: response.parse_methods || [],
-  selectedParseMethod: getDefaultParseMethod(response.parse_methods || [])
 })
 
 const updateItem = (localId, patch) => {
@@ -177,9 +125,6 @@ const uploadFile = async (file) => {
     fileSize: file.size,
     status: 'uploading',
     error: null,
-    parseError: null,
-    parseSupported: false,
-    parseMethods: []
   }
   fileItems.value.push(item)
 
@@ -220,56 +165,6 @@ watch(
   { flush: 'post' }
 )
 
-const isParseDisabled = (item) =>
-  item.status === 'parsing' || !item.selectedParseMethod || confirming.value
-
-const clearParsedState = {
-  parsedObjectName: null
-}
-
-const handleParseMethodChange = (localId, selectedParseMethod) => {
-  const item = fileItems.value.find((entry) => entry.localId === localId)
-  updateItem(localId, {
-    ...clearParsedState,
-    selectedParseMethod,
-    parseError: null,
-    status: item?.status === 'parsed' ? 'uploaded' : item?.status
-  })
-}
-
-const handleStartParse = (localId) => {
-  const item = fileItems.value.find((entry) => entry.localId === localId)
-  if (!item || isParseDisabled(item)) return
-  void handleParse(item)
-}
-
-const handleParse = async (item) => {
-  if (!item.objectName || !item.selectedParseMethod) return
-
-  updateItem(item.localId, {
-    ...clearParsedState,
-    status: 'parsing',
-    parseError: null
-  })
-  try {
-    const response = await threadApi.parseTmpAttachment({
-      object_name: item.objectName,
-      parse_method: item.selectedParseMethod
-    })
-    updateItem(item.localId, {
-      status: 'parsed',
-      parsedObjectName: response.parsed_object_name
-    })
-    message.success('附件解析完成')
-  } catch (error) {
-    updateItem(item.localId, {
-      ...clearParsedState,
-      status: 'uploaded',
-      parseError: getErrorMessage(error, '解析失败')
-    })
-  }
-}
-
 const removeItem = (localId) => {
   fileItems.value = fileItems.value.filter((item) => item.localId !== localId)
 }
@@ -279,8 +174,7 @@ const handleConfirm = async () => {
 
   const attachments = confirmableItems.value.map((item) => ({
     file_type: item.fileType,
-    object_name: item.objectName,
-    parsed_object_name: item.parsedObjectName || null
+    object_name: item.objectName
   }))
 
   confirming.value = true
@@ -310,8 +204,6 @@ const getStatusColor = (status) => {
   const colorMap = {
     uploading: 'processing',
     uploaded: 'blue',
-    parsing: 'processing',
-    parsed: 'green',
     error: 'red'
   }
   return colorMap[status] || 'default'
@@ -321,8 +213,6 @@ const getStatusLabel = (status) => {
   const labelMap = {
     uploading: '上传中',
     uploaded: '已上传',
-    parsing: '解析中',
-    parsed: '已解析',
     error: '失败'
   }
   return labelMap[status] || status
@@ -449,22 +339,4 @@ const formatFileSize = (size) => {
   color: var(--color-error-700);
 }
 
-.parse-trigger-btn {
-  flex: none;
-  font-size: 12px;
-}
-
-.attachment-parse-controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: min(260px, 100%);
-  margin-left: auto;
-
-  :deep(.ocr-selector-trigger) {
-    min-height: 24px;
-    padding: 1px 8px;
-    font-size: 12px;
-  }
-}
 </style>

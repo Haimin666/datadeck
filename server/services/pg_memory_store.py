@@ -9,26 +9,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
-from sqlalchemy import Column, DateTime, Index, Integer, String, Text, text as sa_text
+from sqlalchemy import text as sa_text
 
 from server.db import async_session_factory
-from server.models import Base
 from server.utils.datetime_utils import utc_now_naive
-
-
-class AgentMemory(Base):
-    __tablename__ = "agent_memories"
-    __table_args__ = (Index("ix_agent_memories_uid", "uid"),)
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    uid = Column(String(64), nullable=False)
-    thread_id = Column(String(64), nullable=True)
-    run_id = Column(String(64), nullable=True)
-    content = Column(Text, nullable=False)
-    replaces = Column(String(128), nullable=True)  # 替换目标记忆 id（幂等覆盖）
-    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
 
 
 class PgMemoryStore:

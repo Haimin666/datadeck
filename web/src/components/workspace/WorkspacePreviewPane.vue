@@ -10,6 +10,7 @@
       :show-fullscreen="true"
       :full-height="true"
       :editable="editable"
+      :edit-all-text="true"
       :saving="saving"
       container-class="workspace-preview-container"
       content-class="workspace-preview-content"
@@ -23,7 +24,7 @@
     <div v-else class="preview-empty">
       <FileSearch :size="28" />
       <h3>选择文件以预览</h3>
-      <p>支持 Markdown、TXT 编辑，其他格式保持只读预览。</p>
+      <p>个人空间中的 UTF-8 文本文件均可编辑，二进制文件仅支持预览或下载。</p>
     </div>
   </aside>
 </template>

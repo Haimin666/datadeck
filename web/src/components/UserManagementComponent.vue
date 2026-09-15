@@ -38,9 +38,9 @@
       <div class="filter-actions">
         <a-select v-model:value="userManagement.roleFilter" class="filter-select">
           <a-select-option value="">全部权限</a-select-option>
-          <a-select-option value="superadmin">超级管理员</a-select-option>
-          <a-select-option value="admin">管理员</a-select-option>
-          <a-select-option value="user">普通用户</a-select-option>
+          <a-select-option v-for="role in availableRoles" :key="role.slug" :value="role.slug">
+            {{ role.name }}
+          </a-select-option>
         </a-select>
       </div>
     </div>
@@ -218,10 +218,9 @@
           </a-form-item>
         </template>
 
-        <a-form-item v-if="!userManagement.editMode" label="角色" class="form-item">
+        <a-form-item label="角色" class="form-item">
           <a-select v-model:value="userManagement.form.role">
-            <a-select-option value="user">普通用户</a-select-option>
-            <a-select-option value="admin" v-if="userStore.isSuperAdmin">管理员</a-select-option>
+            <a-select-option v-for="role in availableRoles" :key="role.slug" :value="role.slug">{{ role.name }}</a-select-option>
           </a-select>
         </a-form-item>
 
@@ -231,7 +230,7 @@
 </template>
 
 <script setup>
-import { reactive, onMounted, onUnmounted, watch, computed } from 'vue'
+import { reactive, onMounted, onUnmounted, watch, computed, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/stores/user'
 import { authApi } from '@/apis'
@@ -242,6 +241,7 @@ import { generatePixelAvatar } from '@/utils/pixelAvatar'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 
 const userStore = useUserStore()
+const availableRoles = ref([])
 
 const columns = [
   { title: '用户', key: 'user', width: '26%' },
@@ -258,7 +258,7 @@ const getRoleDisplayName = (role) => {
     admin: '管理员',
     user: '普通用户'
   }
-  return map[role] || role || '普通用户'
+  return availableRoles.value.find((item) => item.slug === role)?.name || map[role] || role || '普通用户'
 }
 
 // 用户管理相关状态
@@ -430,7 +430,17 @@ const handleRefresh = async () => {
 }
 
 // 打开添加用户模态框
-const showAddUserModal = () => {
+const refreshAvailableRoles = async () => {
+  try {
+    const data = await authApi.getUserAccessOptions()
+    availableRoles.value = data.roles || []
+  } catch (error) {
+    console.warn('刷新角色列表失败:', error)
+  }
+}
+
+const showAddUserModal = async () => {
+  await refreshAvailableRoles()
   userManagement.modalTitle = '添加用户'
   userManagement.editMode = false
   userManagement.editUserId = null
@@ -449,7 +459,8 @@ const showAddUserModal = () => {
 }
 
 // 打开编辑用户模态框
-const showEditUserModal = (user) => {
+const showEditUserModal = async (user) => {
+  await refreshAvailableRoles()
   userManagement.modalTitle = '编辑用户'
   userManagement.editMode = true
   userManagement.editUserId = user.id
@@ -457,6 +468,7 @@ const showEditUserModal = (user) => {
     username: user.username,
     generatedUid: user.uid || '', // 编辑模式显示现有的uid
     phoneNumber: user.phone_number || '',
+    role: user.role || 'user',
     password: '',
     confirmPassword: '',
     usernameError: '',
@@ -513,7 +525,8 @@ const handleUserFormSubmit = async () => {
     if (userManagement.editMode) {
       // 创建更新数据对象
       const updateData = {
-        username: userManagement.form.username.trim()
+        username: userManagement.form.username.trim(),
+        role: userManagement.form.role
       }
 
       // 添加手机号字段
@@ -590,7 +603,10 @@ const confirmDeleteUser = (user) => {
 
 // 在组件挂载时获取用户列表
 onMounted(async () => {
-  await fetchUsers()
+  await Promise.all([
+    fetchUsers(),
+    authApi.getUserAccessOptions().then((data) => { availableRoles.value = data.roles || [] })
+  ])
 })
 
 onUnmounted(() => {

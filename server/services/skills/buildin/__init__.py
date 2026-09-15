@@ -1,7 +1,6 @@
-"""内置 Skill 定义（自 Yuxi agents/skills/buildin 照搬；去掉 knowledge-base 与 knowledge gate）。
+"""内置 Skill 定义。
 
-datadeck 无知识库栈：knowledge_capability_enabled() 恒为 False。
-mysql-reporter 依赖 mcp-server-chart（MCP 管理 + datadeck toolkits 已支持）。
+知识库由宿主运行时装配；Skill 只声明自身的内容和依赖，不负责判断知识库能力。
 """
 
 from __future__ import annotations
@@ -50,8 +49,8 @@ BUILTIN_SKILLS: list[BuiltinSkillSpec] = [
     BuiltinSkillSpec(
         slug="mysql-reporter",
         source_dir=_SKILLS_ROOT / "mysql-reporter",
-        description="基于 MySQL 数据库生成查询报表和可视化图表，适合分析业务指标、统计趋势，并用 Charts MCP 展示结果。",
+        description="基于 MySQL 数据库生成查询报表，适合分析业务指标、统计趋势。",
         version="2026.06.05",
-        mcp_dependencies=("mcp-server-chart",),
+        tool_dependencies=("run_skill_script",),
     ),
 ]

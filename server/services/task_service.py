@@ -34,6 +34,14 @@ def _iso_to_utc_naive(value: str | None) -> datetime | None:
     return coerce_any_to_utc_datetime(value).replace(tzinfo=None)
 
 
+def _is_schedule_tick_claimed(last_run_at: datetime | None, tick: datetime) -> bool:
+    """判断持久化的最近执行时间是否已经领取当前分钟。"""
+    return bool(
+        last_run_at
+        and last_run_at.replace(second=0, microsecond=0) >= tick
+    )
+
+
 @dataclass
 class Task:
     id: str
@@ -154,7 +162,15 @@ class Tasker:
 
         now = datetime.now().replace(second=0, microsecond=0)
         async with async_session_factory() as db:
-            rows = (await db.execute(select(ScheduledTask).where(ScheduledTask.enabled.is_(True)))).scalars().all()
+            rows = (await db.execute(
+                select(ScheduledTask)
+                .where(ScheduledTask.enabled.is_(True))
+                .with_for_update(skip_locked=True)
+            )).scalars().all()
+            active_ids = {definition.id for definition in rows}
+            for task_id in tuple(self._scheduled_ticks):
+                if task_id not in active_ids:
+                    self._scheduled_ticks.pop(task_id, None)
             for definition in rows:
                 tick = now.isoformat()
                 try:
@@ -162,9 +178,14 @@ class Tasker:
                 except (TypeError, ValueError):
                     logger.warning("Skip invalid scheduled task cron: %s", definition.id)
                     matches = False
-                if self._scheduled_ticks.get(definition.id) == tick or not matches:
+                last_run_at = definition.last_run_at
+                already_claimed = _is_schedule_tick_claimed(last_run_at, now)
+                if (
+                    self._scheduled_ticks.get(definition.id) == tick
+                    or already_claimed
+                    or not matches
+                ):
                     continue
-                self._scheduled_ticks[definition.id] = tick
                 payload = {"scheduled_task_id": definition.id, "uid": definition.uid}
                 task, created = await self.enqueue_unique_by_payload(
                     name=definition.name,
@@ -174,6 +195,7 @@ class Tasker:
                     statuses={"pending", "running"},
                     coroutine=self._scheduled_agent_coroutine(definition.id),
                 )
+                self._scheduled_ticks[definition.id] = tick
                 if created:
                     definition.last_task_id = task.id
                     definition.last_run_at = now

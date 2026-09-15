@@ -12,6 +12,7 @@ from datadeck.agents.buildin.chatbot.graph import ChatbotAgent
 from datadeck.agents.buildin.dataagent import DataAgent
 from datadeck.ports.checkpointer import CheckpointerProvider
 from server.config import settings
+from server.services.model_providers.cache import model_cache
 
 # AsyncPostgresSaver 自身维护连接池；单例持有使 checkpointer 跨请求复用
 # （线程内多轮记忆 + interrupt 恢复）。
@@ -49,17 +50,11 @@ async def get_chatbot_agent() -> ChatbotAgent:
     if _agent is None:
         saver = await _init_saver()
         from server.services.pg_memory_store import PgMemoryStore
-        from server.services.platform_agent_hooks import (
-            platform_context_skills_resolver,
-            platform_extra_middlewares,
-        )
 
         _agent = ChatbotAgent(
-            model_provider=PlatformModelProvider(),
+            model_provider=PlatformModelProvider(model_cache),
             checkpointer_provider=PgCheckpointerProvider(saver),
             memory_store=PgMemoryStore(),
-            extra_middlewares=platform_extra_middlewares,
-            context_skills_resolver=platform_context_skills_resolver,
         )
     return _agent
 
@@ -71,17 +66,11 @@ async def get_agent(agent_slug: str = "default-chatbot", backend_id: str | None 
         if _data_agent is None:
             saver = await _init_saver()
             from server.services.pg_memory_store import PgMemoryStore
-            from server.services.platform_agent_hooks import (
-                platform_context_skills_resolver,
-                platform_extra_middlewares,
-            )
 
             _data_agent = DataAgent(
-                model_provider=PlatformModelProvider(),
+                model_provider=PlatformModelProvider(model_cache),
                 checkpointer_provider=PgCheckpointerProvider(saver),
                 memory_store=PgMemoryStore(),
-                extra_middlewares=platform_extra_middlewares,
-                context_skills_resolver=platform_context_skills_resolver,
             )
         return _data_agent
     return await get_chatbot_agent()

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import MISSING, dataclass, field, fields
-from typing import get_origin
+from typing import Any, get_origin
 
 # ── 摘要/预算默认常量（自 Yuxi 原样迁移）─────────────────────────
 DEFAULT_SUMMARY_THRESHOLD_K = 100            # 100K tokens 触发摘要
@@ -85,11 +85,27 @@ class BaseContext:
         metadata={"name": "请求 ID", "configurable": False, "hide": True},
     )
 
+    agent_backend_id: str = field(default="", metadata={"hide": True})
+
+    project_id: str | None = field(default=None, metadata={"hide": True})
+
+    workdir_path: str | None = field(default=None, metadata={"hide": True})
+
+    routing_hint: str = field(
+        default="",
+        metadata={"hide": True},
+    )
+
+    task_kind: str = field(
+        default="",
+        metadata={"hide": True},
+    )
+
     subagent_depth: int = field(default=0, metadata={"hide": True})
 
     model: str = field(
         default="",
-        metadata={"name": "模型", "description": "使用的聊天模型 spec (provider:model_id)", "type": "string"},
+        metadata={"name": "模型", "description": "使用的聊天模型 spec (provider:model_id)", "type": "string", "kind": "llm"},
     )
 
     system_prompt: str = field(
@@ -104,7 +120,7 @@ class BaseContext:
 
     knowledge_base_id: str | None = field(
         default=None,
-        metadata={"name": "知识库", "description": "本次 Agent 检索使用的知识库 ID", "type": "string", "kind": "knowledge"},
+        metadata={"hide": True},
     )
 
     knowledges: list[str] | None = field(
@@ -115,10 +131,8 @@ class BaseContext:
     # 由宿主根据 knowledge_base_id 做权限校验后注入，核心层不自行解析数据库。
     knowledge_base_collection: str | None = field(default=None, metadata={"hide": True})
 
-    mcps: list[str] | None = field(
-        default=None,
-        metadata={"name": "MCP 服务", "description": "本次 Agent 可使用的 MCP 服务 slug 列表", "type": "list", "kind": "mcp"},
-    )
+    # 由宿主注入的本次运行已授权 collection 列表。
+    knowledge_base_collections: list[str] = field(default_factory=list, metadata={"hide": True})
 
     skills: list[str] | None = field(
         default=None,
@@ -130,44 +144,90 @@ class BaseContext:
         metadata={"name": "子智能体", "description": "允许主智能体分派的子智能体 slug 列表", "type": "list", "kind": "subagents"},
     )
 
+    scheduled_tasks: list[str] | None = field(
+        default=None,
+        metadata={"name": "定时任务", "description": "本次运行可访问的定时任务 ID 列表", "type": "list", "kind": "scheduled_tasks"},
+    )
+
+    attachment_file_ids: list[str] | None = field(default=None, metadata={"hide": True})
+
+    attachments: list[dict[str, Any]] = field(default_factory=list, metadata={"hide": True})
+
+    delegation_enabled: bool = field(
+        default=False,
+        metadata={"hide": True},
+    )
+
+    subagent_workflow: dict | None = field(
+        default=None,
+        metadata={"hide": True},
+    )
+
     preload_skills: list[str] | None = field(
         default=None,
-        metadata={"name": "预加载 Skills", "description": "预加载的 Skill slug 列表", "type": "list", "kind": "skills"},
+        metadata={"hide": True},
+    )
+
+    # 宿主在运行时装配完成后注入 middleware 实例；核心只消费快照，不执行宿主回调。
+    runtime_middlewares: tuple[Any, ...] = field(
+        default_factory=tuple,
+        metadata={"hide": True},
+    )
+
+    # 宿主装配器生成的请求级工具快照；正式运行时核心图只消费此列表。
+    runtime_tools: tuple[Any, ...] = field(
+        default_factory=tuple,
+        metadata={"hide": True},
+    )
+
+    # Trace 使用的工具描述，以及按 MCP Server 分组的已实例化工具。
+    runtime_tool_descriptors: dict[str, dict[str, Any]] = field(
+        default_factory=dict,
+        metadata={"hide": True},
+    )
+    runtime_mcp_tools: dict[str, tuple[Any, ...]] = field(
+        default_factory=dict,
+        metadata={"hide": True},
     )
 
     summary_threshold: int = field(
         default=DEFAULT_SUMMARY_THRESHOLD_K,
-        metadata={"name": "上下文摘要触发阈值 (K)", "description": "超过该值(K tokens)启用摘要", "type": "number"},
+        metadata={"hide": True},
     )
 
     summary_keep_messages: int = field(
         default=DEFAULT_SUMMARY_KEEP_MESSAGES,
-        metadata={"name": "摘要后保留消息数", "description": "摘要触发后保留最近消息数", "type": "number"},
+        metadata={"hide": True},
     )
 
     summary_prompt: str = field(
         default=DEFAULT_DATADECK_SUMMARY_PROMPT,
-        metadata={"name": "上下文摘要提示词", "description": "摘要提示词，须含 {messages} 占位符", "type": "string"},
+        metadata={"hide": True},
     )
 
     summary_tool_result_token_limit: int = field(
         default=DEFAULT_SUMMARY_TOOL_RESULT_TOKEN_LIMIT,
-        metadata={"name": "摘要工具结果 token 上限", "type": "number"},
+        metadata={"hide": True},
     )
 
     summary_l2_trigger_ratio: float = field(
         default=DEFAULT_SUMMARY_L2_TRIGGER_RATIO,
-        metadata={"name": "L2 摘要触发比例", "type": "number"},
+        metadata={"hide": True},
     )
 
     max_execution_steps: int = field(
         default=DEFAULT_MAX_EXECUTION_STEPS,
-        metadata={"name": "最大执行步数", "description": "单次运行最大执行步数(recursion_limit)", "type": "number"},
+        metadata={"hide": True},
     )
 
     model_retry_times: int = field(
         default=2,
-        metadata={"name": "模型重试次数", "type": "number"},
+        metadata={"hide": True},
+    )
+
+    tool_timeout_seconds: int = field(
+        default=120,
+        metadata={"hide": True},
     )
 
     @classmethod

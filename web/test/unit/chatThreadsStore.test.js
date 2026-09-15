@@ -86,3 +86,46 @@ test('置顶线程不占用普通线程分页 offset 且不会提前结束加载
     await server.close()
   }
 })
+
+test('迟到的线程列表响应不会覆盖发送期间创建的新线程', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, appType: 'custom' })
+  setActivePinia(createPinia())
+  try {
+    const { threadApi } = await server.ssrLoadModule('/src/apis/agent_api.js')
+    let resolveList
+    threadApi.getThreads = () => new Promise((resolve) => {
+      resolveList = resolve
+    })
+
+    const { useChatThreadsStore } = await server.ssrLoadModule('/src/stores/chatThreads.js')
+    const store = useChatThreadsStore()
+    const loading = store.loadThreads()
+    store.upsertThread({ id: 'thread-new', title: '刚发送的对话' })
+    store.setCurrentThreadId('thread-new')
+    resolveList([{ id: 'thread-old', title: '旧列表结果' }])
+    await loading
+
+    assert.deepEqual(store.threads.map((item) => item.id), ['thread-new'])
+    assert.equal(store.currentThreadId, 'thread-new')
+  } finally {
+    await server.close()
+  }
+})
+
+test('分页外的深链接线程可以按 ID 补载', async () => {
+  const server = await createServer({ server: { middlewareMode: true }, appType: 'custom' })
+  setActivePinia(createPinia())
+  try {
+    const { threadApi } = await server.ssrLoadModule('/src/apis/agent_api.js')
+    threadApi.getThread = async (threadId) => ({ id: threadId, title: '历史对话' })
+
+    const { useChatThreadsStore } = await server.ssrLoadModule('/src/stores/chatThreads.js')
+    const store = useChatThreadsStore()
+    const thread = await store.loadThread('thread-page-2')
+
+    assert.equal(thread.id, 'thread-page-2')
+    assert.equal(store.threads[0].id, 'thread-page-2')
+  } finally {
+    await server.close()
+  }
+})

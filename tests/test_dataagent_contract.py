@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 
 import pytest
 
@@ -11,9 +12,17 @@ from server.routers.eval_router import _extract_stream_event
 from datadeck.agents.middlewares.data_workflow import DataWorkflowMiddleware
 from langchain_core.messages import ToolMessage
 from datadeck.agents.tool_approval import SENSITIVE_BACKEND_TOOLS
+from datadeck.agents.policy import DATA_AGENT_POLICY
+from datadeck.agents.toolkits.service import get_tool_descriptors
 from datadeck.agents.toolkits.service import get_tool_metadata
-from server.services.agent_runtime_tools import build_agent_runtime_tools, summarize_subagent_results
-from server.services.mcp.service import _mcp_discovery_timeout
+from datadeck.agents.toolkits.service import get_tool_instances_for_context
+from server.services.agent_runtime_tools import (
+    _selected_runtime_ids,
+    build_agent_runtime_tools,
+    summarize_subagent_results,
+)
+from server.services.mcp.service import _mcp_discovery_timeout, _mcp_error_summary
+import server.services.mcp.service as mcp_service
 
 
 @pytest.mark.asyncio
@@ -35,11 +44,31 @@ async def test_dataagent_keeps_data_tools_when_host_configures_extra_tools(monke
         return context
 
     monkeypatch.setattr(ChatbotAgent, "get_graph", fake_get_graph)
-    context = ChatBotContext(tools=["echo"])
+    context = ChatBotContext(tools=["package:platform"])
     result = await DataAgent.get_graph(object.__new__(DataAgent), context)
 
     assert result.tools[:len(DATA_AGENT_TOOLS)] == DATA_AGENT_TOOLS
-    assert "echo" in result.tools
+    assert "package:platform" in result.tools
+
+
+@pytest.mark.asyncio
+async def test_dataagent_metadata_graph_is_available_for_history(monkeypatch):
+    captured = {}
+
+    async def fake_parent_graph(self, context=None, **kwargs):
+        captured["context"] = context
+        captured["kwargs"] = kwargs
+        return context
+
+    monkeypatch.setattr(ChatbotAgent, "get_graph", fake_parent_graph)
+
+    result = await DataAgent.get_graph(
+        object.__new__(DataAgent), metadata_only=True,
+    )
+
+    assert result._runtime_mode == "metadata"
+    assert result.tools[:len(DATA_AGENT_TOOLS)] == DATA_AGENT_TOOLS
+    assert captured["kwargs"]["metadata_only"] is True
 
 
 def test_text_knowledge_chunks_are_bounded_and_overlap():
@@ -63,9 +92,23 @@ def test_scheduled_task_mutations_require_approval_by_default():
 
 def test_platform_tools_are_visible_in_tool_metadata():
     slugs = {item["slug"] for item in get_tool_metadata()}
-    assert {"read_file", "scheduled_task_list", "scheduled_task_create"} <= slugs
+    assert {"read_file", "ask_user_question", "scheduled_task_list", "scheduled_task_create"} <= slugs
     assert {"subagent_start", "subagent_status", "subagent_await"} <= slugs
     assert "subagent_orchestrate" in slugs
+
+
+def test_dataagent_fixed_tools_are_visible_to_runtime_assembler():
+    slugs = {item.slug for item in get_tool_descriptors()}
+
+    assert set(DATA_AGENT_POLICY.fixed_tool_selection) <= slugs
+
+
+def test_metric_review_status_is_normalized_to_persisted_status():
+    from server.routers.metric_router import _normalize_metric_context
+
+    assert _normalize_metric_context(
+        {"source": "code", "review_status": "needs_review"}, "approved",
+    ) == {"source": "code", "review_status": "approved"}
 
 
 def test_mcp_discovery_timeout_is_bounded():
@@ -80,13 +123,67 @@ def test_context_exposes_subagent_allowlist():
 
 
 def test_runtime_tool_contract_includes_subagent_lifecycle_tools():
-    context = ChatBotContext(thread_id="parent", run_id="run", subagents=["researcher"])
+    context = ChatBotContext(
+        thread_id="parent", run_id="run", subagents=["researcher"], delegation_enabled=True,
+    )
     user = type("User", (), {"uid": "u1"})()
     tools = build_agent_runtime_tools(context, user)
     names = {tool.name for tool in tools}
     assert {"subagent_start", "subagent_status", "subagent_events",
             "subagent_cancel", "subagent_await", "subagent_orchestrate"} <= names
     assert all(tool.handle_tool_error is True for tool in tools)
+
+
+def test_scheduled_task_tools_use_the_runtime_resource_selection():
+    selected = ChatBotContext(scheduled_tasks=["task-1", "task-2"])
+    assert _selected_runtime_ids(selected, "scheduled_tasks") == {"task-1", "task-2"}
+
+    selected.scheduled_tasks = []
+    assert _selected_runtime_ids(selected, "scheduled_tasks") == set()
+
+    default = ChatBotContext(scheduled_tasks=None)
+    assert _selected_runtime_ids(default, "scheduled_tasks") is None
+
+
+def test_subagent_tools_require_explicit_delegation_and_allowlist():
+    user = type("User", (), {"uid": "u1"})()
+    disabled = build_agent_runtime_tools(
+        ChatBotContext(thread_id="parent", run_id="run", subagents=["researcher"]), user,
+    )
+    assert "subagent_start" not in {tool.name for tool in disabled}
+
+    empty_allowlist = build_agent_runtime_tools(
+        ChatBotContext(thread_id="parent", run_id="run", subagents=[], delegation_enabled=True), user,
+    )
+    assert "subagent_start" not in {tool.name for tool in empty_allowlist}
+
+
+def test_dataagent_policy_blocks_subagent_tools_even_if_configured():
+    user = type("User", (), {"uid": "u1"})()
+    context = ChatBotContext(
+        tools=DATA_AGENT_TOOLS, subagents=["researcher"], delegation_enabled=True,
+    )
+    context.agent_backend_id = "DataAgent"
+
+    names = {tool.name for tool in build_agent_runtime_tools(context, user)}
+
+    assert "metric_lookup" in names
+    assert "subagent_start" not in names
+
+
+def test_knowledge_package_mounts_metric_lookup_for_generic_agent():
+    user = type("User", (), {"uid": "u1"})()
+    context = ChatBotContext(
+        tools=["package:knowledge"],
+        agent_backend_id="ChatbotAgent",
+    )
+
+    names = {
+        tool.name for tool in get_tool_instances_for_context(context)
+    }
+    names.update(tool.name for tool in build_agent_runtime_tools(context, user))
+
+    assert {"rag_search", "metric_lookup"} <= names
 
 
 def test_subagent_summary_rejects_partial_failure():
@@ -100,6 +197,80 @@ def test_cron_validation_is_shared_by_api_and_scheduler():
     for expression in ("60 * * * *", "0 25 * * *", "0 9 32 * *", "0 9 * 13 *"):
         with pytest.raises(ValueError):
             validate_cron_expression(expression)
+
+
+def test_mcp_error_summary_keeps_nested_connection_reason_and_redacts_secrets():
+    error = ExceptionGroup("TaskGroup", [
+        ConnectionError("cannot connect to mcp.internal:3000"),
+        ValueError("Authorization: Bearer top-secret"),
+        OSError("request failed for https://mcp.internal:3000/sse?token=path-secret"),
+    ])
+
+    summary = _mcp_error_summary(error)
+
+    assert "ConnectionError" in summary
+    assert "cannot connect to mcp.internal:3000" in summary
+    assert "top-secret" not in summary
+    assert "path-secret" not in summary
+    assert "https://mcp.internal:3000/<redacted>" in summary
+    assert "Authorization=<redacted>" in summary
+
+
+@pytest.mark.asyncio
+async def test_mcp_http_client_does_not_inherit_ambient_proxy(monkeypatch):
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, configs):
+            captured.update(configs)
+
+    monkeypatch.setattr(mcp_service, "MultiServerMCPClient", FakeClient)
+    monkeypatch.delenv("DATADECK_MCP_HTTP_PROXY", raising=False)
+    await mcp_service.get_mcp_client({
+        "http": {"transport": "streamable_http", "url": "http://example.test/mcp"},
+        "stdio": {"transport": "stdio", "command": "python", "args": []},
+    })
+
+    factory = captured["http"]["httpx_client_factory"]
+    client = factory(headers=None, timeout=None, auth=None)
+    try:
+        assert client._trust_env is False
+    finally:
+        await client.aclose()
+    assert "httpx_client_factory" not in captured["stdio"]
+
+
+@pytest.mark.asyncio
+async def test_remote_model_catalog_does_not_inherit_ambient_proxy(monkeypatch):
+    from types import SimpleNamespace
+    import server.services.model_providers.service as provider_service
+
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def fetch(_client, _provider, _headers, _endpoint, _model_type):
+        return []
+
+    monkeypatch.setattr(provider_service.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(provider_service, "_fetch_models_from_endpoint", fetch)
+
+    await provider_service.fetch_remote_models(SimpleNamespace(
+        base_url="https://example.test/v1", proxy_url="", api_key="",
+        api_key_env="", headers_json={}, capabilities=[],
+        models_endpoint="/models", embedding_models_endpoint=None,
+        rerank_models_endpoint=None,
+    ))
+
+    assert captured["kwargs"]["trust_env"] is False
 
 
 @pytest.mark.asyncio
@@ -138,6 +309,98 @@ async def test_data_workflow_requires_rag_for_metric_queries():
     blocked = await middleware.awrap_tool_call(request, lambda _request: None)
     assert blocked.status == "error"
     assert "rag_search" in blocked.content
+
+
+@pytest.mark.asyncio
+async def test_data_workflow_routes_sync_to_dba_without_omd_fallback():
+    middleware = DataWorkflowMiddleware()
+    context = type("Context", (), {"task_kind": "sync"})()
+    runtime = type("Runtime", (), {"context": context})()
+    request = type("Request", (), {
+        "runtime": runtime,
+        "tool_call": {"id": "call-sync", "name": "omd_search_tables", "args": {}},
+    })()
+
+    blocked = await middleware.awrap_tool_call(request, lambda _request: None)
+
+    assert blocked.status == "error"
+    assert "dba Skill" in blocked.content
+    assert context._data_workflow["intent"] == "sync"
+    assert context._data_workflow["steps"] == []
+
+
+@pytest.mark.asyncio
+async def test_data_workflow_persists_steps_and_evidence_after_tool_success():
+    middleware = DataWorkflowMiddleware()
+    context = type("Context", (), {"task_kind": "data"})()
+    runtime = type("Runtime", (), {"context": context})()
+    request = type("Request", (), {
+        "runtime": runtime,
+        "tool_call": {"id": "call-schema", "name": "omd_get_table_schema",
+                       "args": {"service_name": "warehouse"}},
+    })()
+
+    async def handler(_request):
+        return ToolMessage(content="schema", tool_call_id="call-schema")
+
+    result = await middleware.awrap_tool_call(request, handler)
+
+    assert result.update["data_workflow"]["steps"] == ["omd_get_table_schema"]
+    assert result.update["data_workflow"]["evidence"] == ["omd_schema"]
+    assert result.update["data_workflow"]["phase"] == "schema_confirmed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("candidates, expected", [([], True), ([{"table": "one"}], False)])
+async def test_data_workflow_marks_omd_search_selection_for_zero_or_single_candidate(
+    candidates, expected,
+):
+    middleware = DataWorkflowMiddleware()
+    context = type("Context", (), {"task_kind": "schema"})()
+    runtime = type("Runtime", (), {"context": context})()
+    request = type("Request", (), {
+        "runtime": runtime,
+        "tool_call": {"id": "call-search", "name": "omd_search_tables", "args": {}},
+    })()
+
+    async def handler(_request):
+        return ToolMessage(
+            content=json.dumps({"ok": True, "candidates": candidates}),
+            tool_call_id="call-search",
+        )
+
+    result = await middleware.awrap_tool_call(request, handler)
+
+    assert result.update["data_workflow"]["omd_selection_required"] is expected
+
+
+@pytest.mark.asyncio
+async def test_data_workflow_blocks_omd_after_zero_candidate_search():
+    middleware = DataWorkflowMiddleware()
+    context = type("Context", (), {"task_kind": "schema"})()
+    runtime = type("Runtime", (), {"context": context})()
+    search_request = type("Request", (), {
+        "runtime": runtime,
+        "tool_call": {"id": "call-search", "name": "omd_search_tables", "args": {}},
+    })()
+
+    async def search_handler(_request):
+        return ToolMessage(
+            content=json.dumps({"ok": True, "candidates": []}),
+            tool_call_id="call-search",
+        )
+
+    await middleware.awrap_tool_call(search_request, search_handler)
+    schema_request = type("Request", (), {
+        "runtime": runtime,
+        "tool_call": {"id": "call-schema", "name": "omd_get_table_schema",
+                       "args": {"service_name": "warehouse"}},
+    })()
+
+    blocked = await middleware.awrap_tool_call(schema_request, lambda _request: None)
+
+    assert blocked.status == "error"
+    assert "ask_user_question" in blocked.content
 
 
 def test_evaluation_parser_matches_current_nested_sse_contract():

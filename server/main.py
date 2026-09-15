@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 from contextlib import asynccontextmanager
 import traceback
 
@@ -17,20 +18,91 @@ load_dotenv()
 
 from server.config import settings  # noqa: E402
 from datadeck import logger  # noqa: E402
-from server.db import engine, async_session_factory  # noqa: E402
-from server.models import Agent, Base, User  # noqa: E402
+from server.db import async_session_factory, close_db  # noqa: E402
+from server.models import Agent, Role, User  # noqa: E402
+from server.deps import BUILTIN_ROLE_PERMISSIONS  # noqa: E402
 from server.routers import router  # noqa: E402
 from server.routers.run_router import run_router  # noqa: E402
 from server.utils.auth import hash_password  # noqa: E402
 
+
+async def _temporary_workdir_cleanup_loop():
+    """定期清理过期临时会话目录；清理失败不影响主服务。"""
+    from server.workspace.temp_workdir import cleanup_expired_temporary_workdirs
+
+    while True:
+        await asyncio.sleep(60 * 60)
+        try:
+            removed = cleanup_expired_temporary_workdirs()
+            if removed:
+                logger.info("Cleaned %d expired temporary Agent workdirs", removed)
+        except Exception as exc:
+            logger.warning(f"Temporary Agent workdir cleanup failed: {exc}")
+
+
+async def _agent_run_recovery_loop():
+    """定期回收无心跳的 Agent Run，避免进程异常退出后永久 loading。"""
+    from server.services.run_service import recover_orphaned_agent_runs
+
+    while True:
+        await asyncio.sleep(30)
+        try:
+            recovered = await recover_orphaned_agent_runs()
+            if recovered:
+                logger.warning("Recovered %d stale Agent runs", recovered)
+                from server.services.run_service import resume_pending_agent_runs
+                resumed = await resume_pending_agent_runs()
+                if resumed:
+                    logger.info("Resumed %d queued Agent runs after recovery", resumed)
+        except Exception as exc:
+            logger.warning(f"Agent run recovery failed: {exc}")
+
+
+async def _rebuild_rag_indexes_in_background():
+    """在服务就绪后恢复 RAG 派生索引，不阻塞 HTTP 启动。"""
+    from server.services.knowledge_service import rebuild_rag_indexes
+
+    try:
+        async with async_session_factory() as index_db:
+            repaired_documents = await rebuild_rag_indexes(index_db)
+            # async_session_factory 不会自动提交；恢复出的 chunk 和向量状态必须
+            # 在 session 关闭前提交，否则下次启动仍会重复恢复并继续回滚。
+            await index_db.commit()
+        if repaired_documents:
+            logger.info("Repaired persisted RAG chunks: %d documents", repaired_documents)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        # Qdrant/embedding 暂时不可用不能影响已经启动的对话服务；关键词检索
+        # 仍然直接读取 PostgreSQL，下一次启动或手动重试可继续恢复派生索引。
+        logger.warning(f"Background RAG index recovery failed: {exc}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动：建表 + 初始化默认数据
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
+    # Schema 由部署入口的 Alembic 迁移负责；应用启动只初始化默认数据和运行服务。
     async with async_session_factory() as db:
         from sqlalchemy import select as sa_select
+
+        builtin_roles = (
+            ("superadmin", "超级管理员", "拥有全部模块及系统管理权限"),
+            ("admin", "管理员", "可管理业务模块和用户"),
+            ("user", "普通用户", "可使用对话与个人空间"),
+        )
+        for slug, name, description in builtin_roles:
+            role = await db.get(Role, slug)
+            if role is None:
+                db.add(Role(
+                    slug=slug,
+                    name=name,
+                    description=description,
+                    permissions=BUILTIN_ROLE_PERMISSIONS[slug],
+                    is_builtin=True,
+                ))
+            else:
+                role.name = name
+                role.description = description
+                role.permissions = BUILTIN_ROLE_PERMISSIONS[slug]
+                role.is_builtin = True
 
         # 确保内置 Agent 存在：通用对话助手 + 独立数据分析助手
         r = await db.execute(sa_select(Agent).where(Agent.slug == "default-chatbot"))
@@ -84,12 +156,14 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Built-in MCP servers initialization failed: {exc}")
 
     from server.services.task_service import tasker
-    from server.services.knowledge_service import rebuild_rag_indexes
+    from server.workspace.temp_workdir import cleanup_expired_temporary_workdirs
     from server.services.run_service import recover_orphaned_agent_runs, resume_pending_agent_runs
-    async with async_session_factory() as index_db:
-        indexed_documents = await rebuild_rag_indexes(index_db)
-    if indexed_documents:
-        logger.info("Rebuilt RAG keyword index: %d documents", indexed_documents)
+    try:
+        removed_temp_sessions = cleanup_expired_temporary_workdirs()
+        if removed_temp_sessions:
+            logger.info("Cleaned %d expired temporary Agent workdirs", removed_temp_sessions)
+    except Exception as exc:
+        logger.warning(f"Temporary Agent workdir cleanup failed: {exc}")
     recovered = await recover_orphaned_agent_runs()
     if recovered:
         logger.warning("Recovered %d orphaned Agent runs after service restart", recovered)
@@ -98,17 +172,43 @@ async def lifespan(app: FastAPI):
         logger.info("Resumed %d pending Agent runs after service restart", resumed)
     await tasker.start()
     await tasker.start_scheduler()
+    rag_recovery_task = asyncio.create_task(_rebuild_rag_indexes_in_background())
+    temporary_cleanup_task = asyncio.create_task(_temporary_workdir_cleanup_loop())
+    run_recovery_task = asyncio.create_task(_agent_run_recovery_loop())
 
     yield
 
-    # 关闭：释放 agent checkpointer 连接池 + 销毁引擎
+    # 关闭：释放 agent checkpointer 连接池。
+    try:
+        rag_recovery_task.cancel()
+        await rag_recovery_task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.warning(f"RAG index recovery task shutdown failed: {exc}")
+    try:
+        temporary_cleanup_task.cancel()
+        await temporary_cleanup_task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.warning(f"Temporary Agent cleanup task shutdown failed: {exc}")
+    try:
+        run_recovery_task.cancel()
+        await run_recovery_task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.warning(f"Agent run recovery task shutdown failed: {exc}")
     try:
         await tasker.shutdown()
     except Exception as exc:
         logger.warning(f"Tasker shutdown failed: {exc}")
+    from server.services.run_service import shutdown_running_agent_runs
+    await shutdown_running_agent_runs()
     from server.services.agents_provider import close_agent
     await close_agent()
-    await engine.dispose()
+    await close_db()
 
 
 app = FastAPI(
@@ -147,19 +247,11 @@ if os.path.isdir(frontend_dist):
 
 # 用户上传文件（头像/图片）静态服务
 uploads_dir = os.path.join(os.path.dirname(__file__), "..", "uploads")
-legacy_uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
-if os.path.isdir(legacy_uploads_dir):
-    # 兼容早期版本写入 server/uploads 的头像和图片。
-    for upload_kind in ("avatars", "images"):
-        legacy_kind_dir = os.path.join(legacy_uploads_dir, upload_kind)
-        if os.path.isdir(legacy_kind_dir):
-            app.mount(
-                f"/uploads/{upload_kind}",
-                StaticFiles(directory=legacy_kind_dir),
-                name=f"legacy_uploads_{upload_kind}",
-            )
-if os.path.isdir(uploads_dir):
-    app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
+os.makedirs(uploads_dir, exist_ok=True)
+for upload_kind in ("avatars", "images"):
+    canonical_kind_dir = os.path.join(uploads_dir, upload_kind)
+    os.makedirs(canonical_kind_dir, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
 
 # Vite public 资源（logo、登录背景等）需要在生产 API 进程中直接提供。
 if os.path.isdir(frontend_dist):

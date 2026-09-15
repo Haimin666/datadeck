@@ -8,7 +8,6 @@ export const MENTION_ICON_STROKE_WIDTH = 2.2
 const MENTION_TYPE_ICON_COMPONENTS = {
   knowledge: BookOpen,
   skill: WandSparkles,
-  mcp: Plug,
   subagent: Bot
 }
 

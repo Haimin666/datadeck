@@ -6,50 +6,36 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Literal
-from sqlalchemy import select as sa_select, text as sa_text
+from sqlalchemy import or_, select as sa_select, text as sa_text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.db import get_db
-from server.deps import get_required_user
-from server.models import User, Thread, AgentRun, Agent, RunEvent, MessageFeedback, Project
+from server.deps import get_required_user, require_agent_access
+from server.models import User, Thread, Agent, MessageFeedback, Project
+from server.services import attachment_service as att
 from server.services.project_service import create_implicit_project
 from server.utils.datetime_utils import utc_now_naive
 from datadeck import logger
 
+
+def _display_message_content(content: object) -> str:
+    """隐藏旧版本误写入用户消息的内部路由提示。"""
+    value = content if isinstance(content, str) else str(content or "")
+    if value.startswith("[路由提示]"):
+        _, separator, visible = value.partition("\n\n")
+        if separator:
+            return visible
+    return value
+
 chat = APIRouter(prefix="/chat", tags=["chat"])
 
 
-class SimpleCallRequest(BaseModel):
-    query: str
-    meta: dict = {}
-
-
-@chat.post("/call")
-async def simple_call(body: SimpleCallRequest, current_user: User = Depends(get_required_user)):
-    """非流式简单调用，用于标题生成等场景（无线程上下文，一次性调用）。"""
-    from datadeck.agents.buildin.chatbot.graph import ChatbotAgent
-    from datadeck.adapters.platform_model_provider import PlatformModelProvider
-    from datadeck.adapters.checkpointer import MemoryCheckpointerProvider
-
-    provider = PlatformModelProvider()
-    agent = ChatbotAgent(
-        model_provider=provider,
-        checkpointer_provider=MemoryCheckpointerProvider(),
-    )
-    result = await agent.invoke_messages([{"role": "user", "content": body.query}])
-    messages = result.get("messages", [])
-    last_msg = messages[-1] if messages else {"content": ""}
-    content = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
-    return {
-        "response": content,
-        "request_id": body.meta.get("request_id", str(uuid.uuid4())),
-    }
-
-
 class ThreadCreateRequest(BaseModel):
+    request_id: str | None = Field(default=None, min_length=1, max_length=64)
     agent_id: str
     title: str | None = None
-    metadata: dict = {}
+    metadata: dict = Field(default_factory=dict)
     project_id: str | None = None
 
 
@@ -66,6 +52,23 @@ async def create_thread(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if body.request_id:
+        existing = await db.scalar(
+            sa_select(Thread).where(
+                Thread.uid == current_user.uid,
+                Thread.request_id == body.request_id,
+            )
+        )
+        if existing is not None:
+            return existing.to_dict()
+
+    target_agent = await db.scalar(
+        sa_select(Agent).where(or_(Agent.id == body.agent_id, Agent.slug == body.agent_id))
+    )
+    if target_agent is None:
+        raise HTTPException(status_code=404, detail="智能体不存在")
+    await require_agent_access(db, current_user, target_agent.slug)
+
     project = None
     if body.project_id:
         project = await db.scalar(
@@ -84,13 +87,28 @@ async def create_thread(
     t = Thread(
         id=thread_id,
         uid=current_user.uid,
+        request_id=body.request_id,
         agent_id=body.agent_id,
         title=body.title or "新的对话",
         project_id=project.id,
         extra_metadata=body.metadata or {},
     )
     db.add(t)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        if not body.request_id:
+            raise
+        existing = await db.scalar(
+            sa_select(Thread).where(
+                Thread.uid == current_user.uid,
+                Thread.request_id == body.request_id,
+            )
+        )
+        if existing is None:
+            raise
+        return existing.to_dict()
     if project.directory_mode == "managed":
         # 主动物化会话 Workdir（供后续 workspace/project 功能）。目录不可写/暂不可用
         # 不应阻断会话创建——真正使用该 Workdir 的路径会再次尝试并显式报错。
@@ -151,6 +169,23 @@ async def search_threads(
     }
 
 
+@chat.get("/thread/{thread_id}")
+async def get_thread(
+    thread_id: str,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """按 ID 获取当前用户线程，避免深链接依赖首屏分页结果。"""
+    thread = await db.scalar(sa_select(Thread).where(
+        Thread.id == thread_id,
+        Thread.uid == current_user.uid,
+        Thread.status == "active",
+    ))
+    if thread is None:
+        raise HTTPException(status_code=404, detail="对话不存在")
+    return thread.to_dict()
+
+
 @chat.put("/thread/{thread_id}")
 async def update_thread(
     thread_id: str,
@@ -200,19 +235,47 @@ async def delete_thread(
     t = r.scalar_one_or_none()
     if not t:
         raise HTTPException(status_code=404, detail="对话不存在")
-    # 兼容旧数据库：message_feedbacks 可能尚未完成迁移，不能因此阻断线程删除。
-    feedback_table = await db.execute(sa_text(
-        "SELECT to_regclass('public.message_feedbacks')"
-    ))
-    if feedback_table.scalar_one_or_none() is not None:
-        await db.execute(sa_text(
-            "DELETE FROM message_feedbacks WHERE run_id IN ("
-            "SELECT id FROM agent_runs WHERE thread_id=:tid)"
-        ), {"tid": thread_id})
-    await db.execute(sa_text("DELETE FROM run_events WHERE thread_id=:tid"), {"tid": thread_id})
+
+    active = await db.execute(sa_text(
+        "SELECT 1 FROM agent_runs WHERE thread_id=:tid "
+        "AND status IN ('pending', 'running', 'cancel_requested', 'interrupted') LIMIT 1"
+    ), {"tid": thread_id})
+    if active.fetchone() is not None:
+        raise HTTPException(status_code=409, detail="对话仍在运行，请先取消任务后再删除")
+
+    # LangGraph checkpoint 不属于业务 ORM 表，必须通过 checkpointer 的端口
+    # 清理；否则删除线程后仍会保留历史消息、interrupt 和运行状态。
+    agent = await _get_thread_agent(db, t)
+    if agent is not None:
+        get_checkpointer = getattr(agent, "_get_checkpointer", None)
+        if callable(get_checkpointer):
+            try:
+                checkpointer = await get_checkpointer()
+                delete_thread = getattr(checkpointer, "adelete_thread", None)
+                if callable(delete_thread):
+                    await delete_thread(thread_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Failed to delete checkpoint for thread %s: %s", thread_id, exc)
+                raise HTTPException(status_code=503, detail="会话运行状态清理失败，请稍后重试") from exc
+
+    await db.execute(sa_text(
+        "DELETE FROM message_feedback WHERE run_id IN ("
+        "SELECT id FROM agent_runs WHERE thread_id=:tid)"
+    ), {"tid": thread_id})
+    # 部分错误/恢复事件只可靠地记录 run_id，不能只依赖可选的 thread_id。
+    await db.execute(sa_text(
+        "DELETE FROM run_events WHERE run_id IN ("
+        "SELECT id FROM agent_runs WHERE thread_id=:tid)"
+    ), {"tid": thread_id})
+    await db.execute(sa_text("DELETE FROM thread_attachments WHERE thread_id=:tid"), {"tid": thread_id})
     await db.execute(sa_text("DELETE FROM agent_runs WHERE thread_id=:tid"), {"tid": thread_id})
     await db.delete(t)
     await db.commit()
+    try:
+        att.remove_thread_storage(thread_id)
+    except Exception as exc:  # noqa: BLE001
+        # DB 已成功提交，文件清理失败不能回滚业务删除；记录后交给运维清理。
+        logger.warning("Failed to remove storage for deleted thread %s: %s", thread_id, exc)
     return {"ok": True}
 
 
@@ -222,50 +285,104 @@ async def get_thread_history(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """历史消息：读 checkpointer 真实状态（DEVELOPMENT.md M1：history 零自研）。
+    """历史消息：读取 checkpointer 真实状态，统一返回 history。
 
-    契约对齐 1:1 迁移的 Yuxi 前端（fetchThreadMessages 读 response.history，
-    条目按 type='human'|'ai' 分组渲染）。同时保留 messages/last_seq 兼容旧调用。
-
-    thread 查不到（含他人 thread）静默返回空——不 4xx 打断前端（§2.6 坑③）。
+    thread 查不到（含他人 thread）静默返回空，不以 4xx 打断前端。
     """
     r = await db.execute(sa_select(Thread).where(Thread.id == thread_id, Thread.uid == current_user.uid))
     t = r.scalar_one_or_none()
     if not t:
-        return {"history": [], "messages": [], "last_seq": "0-0"}
+        return {"history": []}
 
-    from server.services.agents_provider import get_chatbot_agent
-    agent = await get_chatbot_agent()
+    agent = await _get_thread_agent(db, t)
+    if agent is None:
+        return {"history": []}
     raw = await agent.get_history(current_user.uid, thread_id)
 
+    # SummarizationMiddleware 会在 checkpoint 中用摘要替换旧消息；checkpoint
+    # 只服务 Agent 上下文，不能作为用户历史的唯一来源。run_events 保留了每轮
+    # 请求和流式回复，因此优先从事件账本恢复完整可见历史。
+    event_rows = await db.execute(sa_text(
+        "SELECT r.id, r.request_id, r.input_payload, r.created_at, "
+        "e.seq, e.event_type, e.payload, e.created_at "
+        "FROM agent_runs r LEFT JOIN run_events e ON e.run_id=r.id "
+        "WHERE r.thread_id=:tid AND r.uid=:uid "
+        "ORDER BY r.created_at ASC, e.seq ASC"
+    ), {"tid": thread_id, "uid": current_user.uid})
+    persisted = event_rows.fetchall()
+    if persisted:
+        rebuilt: list[dict] = []
+        current_run = None
+        assistant_content: list[str] = []
+
+        def flush_assistant() -> None:
+            if current_run is None or not assistant_content:
+                return
+            rebuilt.append({
+                "id": f"{current_run[0]}-ai",
+                "type": "ai",
+                "role": "assistant",
+                "content": "".join(assistant_content),
+                "tool_calls": [],
+                "run_id": current_run[0],
+                "request_id": current_run[1],
+                "created_at": current_run[2].isoformat() if current_run[2] else None,
+            })
+            assistant_content.clear()
+
+        for run_id, request_id, input_payload, run_created_at, seq, event_type, payload, event_created_at in persisted:
+            if current_run != (run_id, request_id, run_created_at):
+                flush_assistant()
+                current_run = (run_id, request_id, run_created_at)
+                query = (input_payload or {}).get("query", "")
+                if query:
+                    rebuilt.append({
+                        "id": request_id or run_id,
+                        "type": "human",
+                        "role": "user",
+                        "content": _display_message_content(query),
+                        "request_id": request_id,
+                        "run_id": run_id,
+                        "created_at": run_created_at.isoformat() if run_created_at else None,
+                    })
+            payload = payload or {}
+            if event_type == "messages":
+                chunk = payload.get("chunk") or {}
+                stream_event = chunk.get("stream_event") or {}
+                if stream_event.get("type") == "message_delta":
+                    assistant_content.append(str(stream_event.get("content") or ""))
+            elif event_type == "context_compression":
+                flush_assistant()
+                rebuilt.append({
+                    "id": f"compression-{run_id}-{seq}",
+                    "type": "system",
+                    "role": "system",
+                    "message_type": "context_compression",
+                    "content": payload.get("message") or "上下文已压缩，前面的历史消息已保留。",
+                    "created_at": event_created_at.isoformat() if event_created_at else None,
+                })
+        flush_assistant()
+        if rebuilt:
+            raw = rebuilt
+
     messages = []
-    last_seq = "0-0"
     for m in raw:
         msg_type = m.get("type", "")
-        if msg_type not in ("human", "ai"):
+        if msg_type not in ("human", "ai", "system"):
             continue
         if msg_type == "ai" and not (m.get("content") or "").strip():
             continue
         entry = {
             "id": m.get("id") or str(uuid.uuid4()),
             "type": msg_type,  # 前端 convertServerHistoryToMessages 按 human/ai 分组
-            "role": "user" if msg_type == "human" else "assistant",
-            "content": m.get("content") or "",
+            "role": "user" if msg_type == "human" else "system" if msg_type == "system" else "assistant",
+            "content": _display_message_content(m.get("content")),
             "tool_calls": m.get("tool_calls") or [],
             "created_at": utc_now_naive().isoformat(),
         }
         messages.append(entry)
 
-    # last_seq 用该 thread 最新 run_event（前端仅作断线游标，不再回放历史）
-    r = await db.execute(
-        sa_text("SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE thread_id=:tid"),
-        {"tid": thread_id},
-    )
-    seq = r.scalar_one()
-    if seq:
-        last_seq = str(seq)
-
-    return {"history": messages, "messages": messages, "last_seq": last_seq}
+    return {"history": messages}
 
 
 @chat.get("/thread/{thread_id}/state")
@@ -281,10 +398,11 @@ async def get_thread_state(
     if not t:
         return {"thread_id": thread_id, "agent_state": {}}
 
-    from server.services.agents_provider import get_chatbot_agent
-    agent = await get_chatbot_agent()
+    agent = await _get_thread_agent(db, t)
+    if agent is None:
+        return {"thread_id": thread_id, "agent_state": {}}
     try:
-        graph = await agent.get_graph()
+        graph = await agent.get_graph(metadata_only=True)
         snap = await graph.aget_state({"configurable": {"thread_id": thread_id, "uid": current_user.uid}})
         values = dict(snap.values or {})
     except Exception:  # noqa: BLE001
@@ -300,6 +418,18 @@ async def get_thread_state(
         agent_state["token_usage"] = token_usage
 
     return {"thread_id": thread_id, "agent_state": agent_state, "token_usage": token_usage}
+
+
+async def _get_thread_agent(db: AsyncSession, thread: Thread):
+    """按线程快照选择实际后端，历史和状态读取必须与运行入口一致。"""
+    from server.services.agents_provider import get_agent
+
+    target = await db.scalar(
+        sa_select(Agent).where(or_(Agent.id == thread.agent_id, Agent.slug == thread.agent_id))
+    )
+    if target is None:
+        return None
+    return await get_agent(target.slug, target.backend_id)
 
 
 async def _get_active_run(thread_id: str, uid: str, db: AsyncSession):
@@ -329,16 +459,6 @@ async def get_active_run(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    return await _get_active_run(thread_id, current_user.uid, db)
-
-
-@chat.get("/thread/{thread_id}/active_run")
-async def get_active_run_alias(
-    thread_id: str,
-    current_user: User = Depends(get_required_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """前端 active_run 命名兼容别名。"""
     return await _get_active_run(thread_id, current_user.uid, db)
 
 

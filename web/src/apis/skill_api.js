@@ -81,6 +81,22 @@ export const getPersonalSkillFile = async (slug, path) => {
   )
 }
 
+export const getPersonalSkillTree = async (slug) => {
+  return apiGet(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/tree`)
+}
+
+export const createPersonalSkillFile = async (slug, payload) => {
+  return apiPost(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/file`, payload)
+}
+
+export const updatePersonalSkillFile = async (slug, payload) => {
+  return apiPut(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/file`, payload)
+}
+
+export const deletePersonalSkillFile = async (slug, path) => {
+  return apiDelete(`${USER_BASE_URL}/personal/${encodeURIComponent(slug)}/file?path=${encodeURIComponent(path)}`)
+}
+
 export const createSkillFile = async (slug, payload) => {
   return apiPost(`${BASE_URL}/${encodeURIComponent(slug)}/file`, payload)
 }
@@ -140,6 +156,10 @@ export const skillApi = {
   getSkillTree,
   getSkillFile,
   getPersonalSkillFile,
+  getPersonalSkillTree,
+  createPersonalSkillFile,
+  updatePersonalSkillFile,
+  deletePersonalSkillFile,
   createSkillFile,
   updateSkillFile,
   updateSkillDependencies,

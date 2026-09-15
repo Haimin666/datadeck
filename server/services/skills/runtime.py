@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.services.skills.virtual_paths import VIRTUAL_PERSONAL_SKILLS_PATH, VIRTUAL_SKILLS_PATH
 from server.services.skills.service import list_accessible_skills, normalize_string_list
 from datadeck.agents.toolkits.registry import get_all_tool_instances
-from server.services.skills.runtime_mode import lite_mode_enabled
 from server.models import User
 from datadeck import logger
 from server.utils.paths import open_regular_file_fd
@@ -24,18 +23,10 @@ class RuntimeSkill(TypedDict):
     name: str
     description: str
     path: str
+    source_dir: str
     tools: list[str]
     mcps: list[str]
     skills: list[str]
-
-
-_LITE_DISABLED_SKILL_SLUGS = frozenset({"knowledge-base"})
-
-
-def is_skill_allowed_in_runtime_mode(slug: str) -> bool:
-    """判断 Skill 是否属于当前部署模式允许的运行时能力。"""
-
-    return not (lite_mode_enabled() and slug in _LITE_DISABLED_SKILL_SLUGS)
 
 
 def build_runtime_skills(skills: list) -> dict[str, RuntimeSkill]:
@@ -51,6 +42,7 @@ def build_runtime_skills(skills: list) -> dict[str, RuntimeSkill]:
             "name": item.name,
             "description": item.description,
             "path": f"{root}/{item.slug}/SKILL.md",
+            "source_dir": str(getattr(item, "source_dir", None) or (Path(root) / item.slug)),
             "tools": normalize_string_list(item.tool_dependencies or []),
             "mcps": normalize_string_list(item.mcp_dependencies or []),
             "skills": normalize_string_list(item.skill_dependencies or []),
@@ -101,18 +93,33 @@ async def resolve_runtime_skills_for_context(
     user: User,
 ) -> dict:
     """从已授权 Skill 派生当前 Agent Run 的运行时 scope 与预加载快照。"""
-    skill_items = [
-        item
-        for item in await list_accessible_skills(db, user)
-        if item.slug and is_skill_allowed_in_runtime_mode(item.slug)
-    ]
+    runtime_permissions = getattr(context, "runtime_permissions", None)
+    if runtime_permissions is not None and "extensions" not in set(runtime_permissions):
+        return {
+            "context_skills": [],
+            "context_preload_skills": [],
+            "effective_skills": [],
+            "runtime_skills": {},
+            "runtime_skill_source_scopes": {},
+            "preloaded_skills": [],
+            "preloaded_skill_contents": {},
+        }
+    skill_items = [item for item in await list_accessible_skills(db, user) if item.slug]
     runtime_skills = build_runtime_skills(skill_items)
     available = set(runtime_skills)
-    selected = normalize_string_list(getattr(context, "skills", None))
+    configured_skills = getattr(context, "skills", None)
+    # None=沿用“当前用户可访问的全部 Skill”，空列表=明确关闭可选 Skill。
+    selected = None if configured_skills is None else normalize_string_list(configured_skills)
+    builtin_slugs = [
+        item.slug for item in skill_items if getattr(item, "source_scope", None) == "builtin"
+    ]
     # 未配置 skills 时仍让 Agent 发现当前用户已授权的 Skill；具体内容继续按需读取。
     # 这样新上传的个人 Skill 无需手工修改 Agent 配置才会出现在模型上下文中。
-    if not selected:
+    if selected is None:
         selected = list(runtime_skills)
+    else:
+        # 内置 Skill 是平台能力，不由 Agent 配置白名单控制，始终挂载。
+        selected = [*builtin_slugs, *selected]
     context_skills = [slug for slug in selected if slug in available]
     effective_skills = expand_skill_closure(context_skills, runtime_skills)
     configured_preloads = normalize_string_list(getattr(context, "preload_skills", None))

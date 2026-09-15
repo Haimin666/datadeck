@@ -273,16 +273,13 @@ test('用户管理组件不再通过 Store 全量加载用户', async () => {
   assert.equal(source.includes('paginatedUsers'), false)
 })
 
-test('知识库 API 单一构造并编码文件上传端点', async () => {
-  await withServer(async (server) => {
-    const { fileApi } = await server.ssrLoadModule('/src/apis/knowledge_api.js')
-
-    assert.equal(fileApi.getUploadUrl(), '/api/knowledge/files/upload')
-    assert.equal(
-      fileApi.getUploadUrl('kb/with space'),
-      '/api/knowledge/files/upload?kb_id=kb%2Fwith%20space'
-    )
-  })
+test('知识库 API 统一构造基础文本端点并编码物料 ID', async () => {
+  const source = await import('node:fs/promises').then((fs) =>
+    fs.readFile(new URL('../../src/apis/knowledge_api.js', import.meta.url), 'utf8')
+  )
+  assert.match(source, /apiGet\(`\/api\/knowledge\/databases\/\$\{kbId\}`\)/)
+  assert.match(source, /encodeURIComponent\(documentId\)/)
+  assert.doesNotMatch(source, /knowledge\/files\//)
 })
 
 test('Project 与 Workspace API 按 xhome 契约构造请求', async () => {

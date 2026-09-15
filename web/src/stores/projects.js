@@ -1,12 +1,14 @@
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { projectApi } from '@/apis/project_api'
+import { useUserStore } from '@/stores/user'
 
 export const useProjectsStore = defineStore('projects', () => {
   const projects = ref([])
   const isLoading = ref(false)
   const error = ref('')
   let requestVersion = 0
+  const userStore = useUserStore()
 
   const invalidatePendingLoad = () => {
     requestVersion += 1
@@ -47,6 +49,15 @@ export const useProjectsStore = defineStore('projects', () => {
     invalidatePendingLoad()
     projects.value = projects.value.filter((project) => project.id !== projectId)
   }
+
+  watch(
+    () => userStore.uid,
+    (uid, previousUid) => {
+      if (uid === previousUid) return
+      invalidatePendingLoad()
+      projects.value = []
+    }
+  )
 
   return {
     projects,

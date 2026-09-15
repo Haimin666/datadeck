@@ -77,6 +77,13 @@ export class MessageProcessor {
           status: 'loading'
         }
         conversations.push(currentConv)
+      } else if (item.type === 'system') {
+        // 系统事件（例如上下文压缩）属于历史时间线，必须保留在界面上。
+        if (!currentConv) {
+          currentConv = { messages: [], status: 'finished' }
+          conversations.push(currentConv)
+        }
+        currentConv.messages.push(item)
       } else if (item.type === 'ai' && currentConv) {
         currentConv.messages.push(item)
       }

@@ -37,6 +37,7 @@ dependencies = [
     "psycopg[binary,pool]>=3",
     "redis>=5.0",
     "qdrant-client>=1.14.2",
+    "pymysql>=1.1.0",
 ]
 
 [project.optional-dependencies]
@@ -53,7 +54,6 @@ include = ["datadeck*"]
 [tool.uv]
 constraint-dependencies = [
     "cryptography>=48.0.1",
-    "pypdf>=6.13.3",
     "starlette>=1.3.1",
 ]
 
@@ -64,8 +64,17 @@ pythonpath = [".", "src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# 保持当前项目的可复现基础静态检查；B/DTZ/I 等专项规则另行治理，
+# 不在运行时架构收敛阶段对历史业务代码做无关的批量格式改写。
+select = ["E4", "E7", "E9", "F"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "ruff>=0.13.0",
 ]

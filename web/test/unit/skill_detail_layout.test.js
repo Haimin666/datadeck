@@ -123,6 +123,8 @@ test('共享权限组件隐藏解释和关闭状态占位文案', () => {
   assert.doesNotMatch(source, /class="permission-scope-empty"/)
   assert.doesNotMatch(source, /\.permission-scope-section \{[^}]*border-bottom:/)
   assert.doesNotMatch(source, /\.permission-scope-section \{[^}]*border-radius: 12px/)
+  assert.doesNotMatch(source, /value: 'department'/)
+  assert.match(source, /autoSelectCurrentUser/)
 })
 
 test('保存运行依赖不会重载并覆盖同页尚未保存的范围配置', () => {

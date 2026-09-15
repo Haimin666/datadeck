@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import uuid
 from threading import RLock
 from typing import Any
 
@@ -219,6 +220,11 @@ def _store_key(collection_name: str, chunk_id: str) -> str:
     return f"{collection_name}:{chunk_id}"
 
 
+def _qdrant_point_id(doc_id: str, chunk_index: int) -> uuid.UUID:
+    """将业务 chunk id 转成 Qdrant 接受的稳定 UUID。"""
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"datadeck:{doc_id}#c{chunk_index}")
+
+
 def _remove_bm25_document(collection_name: str, doc_id: str) -> int:
     with _bm25_lock:
         removed = [
@@ -269,10 +275,10 @@ def add_document(
 
         for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
             points.append(PointStruct(
-                id=f"{doc_id}#c{i}",
+                id=_qdrant_point_id(doc_id, i),
                 vector=vec,
                 payload={
-                    "doc_id": doc_id, "chunk_index": i, "title": title,
+                    "chunk_id": f"{doc_id}#c{i}", "doc_id": doc_id, "chunk_index": i, "title": title,
                     "content": chunk, **(metadata or {}),
                 },
             ))
@@ -330,8 +336,8 @@ def _qdrant_search(query: str, top_k: int = 10, domain: str | None = None,
         )
         return [
             {
-                "id": str(p.id),
-                "chunk_id": str(p.id),
+                "id": str(p.payload.get("chunk_id", p.id)),
+                "chunk_id": str(p.payload.get("chunk_id", p.id)),
                 "title": p.payload.get("title", ""),
                 "filename": p.payload.get("filename", p.payload.get("title", "")),
                 "content": p.payload.get("content", ""),
@@ -359,9 +365,11 @@ def _rrf_fuse(vector_hits: list[dict], bm25_hits: list[tuple[str, dict]], k: int
     return fused[:top_k]
 
 
-# BM25 全库索引（进程内缓存；文档量小时足够，生产可换 PG/ES）
+# standalone 模式的本地索引。平台运行时不使用这里的文档状态，宿主会把
+# rag_search 注入到 PostgreSQL 知识库查询。
 _bm25_cache: dict[str, BM25Index] = {}
 _bm25_lock = RLock()
+BM25_CACHE_MAX_COLLECTIONS = 64
 
 
 def _bm25_search(query: str, top_k: int = 10, domain: str | None = None,
@@ -398,13 +406,16 @@ def _bm25_all_index(collection_name: str | None = None) -> BM25Index:
             title = payload.get("title", "")
             index.add(cid, f"{title}\n{payload.get('content', '')}")
         _bm25_cache[key] = index.build()
+        # 只淘汰可按需重建的 BM25 对象；standalone 文档数据由调用方显式维护。
+        if len(_bm25_cache) > BM25_CACHE_MAX_COLLECTIONS:
+            _bm25_cache.pop(next(iter(_bm25_cache)))
         return _bm25_cache[key]
 
 
 def _register_chunk(collection_name: str, chunk_id: str, payload: dict) -> None:
     """add_document 时同步登记 BM25 索引（进程内）。"""
     with _bm25_lock:
-        _chunk_store[_store_key(collection_name, chunk_id)] = payload
+        _chunk_store[_store_key(collection_name, chunk_id)] = dict(payload)
         _bm25_cache.pop(f"{collection_name}:all", None)
 
 
@@ -440,7 +451,7 @@ def search(query: str, top_k: int = 5, domain: str | None = None,
     if not has_keyword_docs and not embedding_configured():
         return {
             "ok": True, "results": [], "strategy": "empty",
-            "note": "知识库为空且未配置 embedding，请先录入文档（POST /api/rag/documents）。",
+            "note": "知识库为空且未配置 embedding，请先在知识库模块录入文本物料。",
         }
 
     vector_hits = (
@@ -486,5 +497,4 @@ def test_connection() -> dict[str, Any]:
     else:
         checks["embedding"] = {"ok": False, "note": "未配置 DATADECK_EMBEDDING_API_KEY，仅 BM25 可用"}
         checks["qdrant"] = {"ok": False, "note": "跳过"}
-    checks["bm25"] = {"ok": True, "chunks": len(_chunk_store)}
     return {"ok": all(v.get("ok") for v in checks.values()), "checks": checks}

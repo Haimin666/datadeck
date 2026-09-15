@@ -1,6 +1,6 @@
 """Agent 运行服务：run 生命周期 + 后台执行器。
 
-架构（对齐 DEVELOPMENT.md §2.2）：
+架构（对齐统一运行时装配方案）：
 - create_agent_run: 落库（新 run=pending；resume 复用 interrupted 原行）
 - dispatch_run: 派发后台 task 执行真图，事件写 run_events；SSE 只轮询表
 - 进程内 registry 记录运行中 task（取消用）；多实例部署由 run_events 轮询兜底
@@ -9,21 +9,51 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import uuid
+from datetime import timedelta
 
 from langgraph.types import Command
-from sqlalchemy import text as sa_text
+from sqlalchemy import select as sa_select, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from server.config import settings
 from server.db import async_session_factory
 from server.event_translator import append_event, consume_graph_stream
-from server.models import AgentRun
-from server.services.agents_provider import get_agent, get_chatbot_agent
+from server.models import AgentRun, User
+from server.services.agents_provider import get_agent
+from server.services.agent_runtime_contract import RuntimeAssemblyError
 from server.utils.datetime_utils import utc_now_naive
 from datadeck import logger
 
 # 进程内运行注册表：run_id → asyncio.Task
 _running: dict[str, asyncio.Task] = {}
+_shutting_down = False
+
+_MENTION_PATTERN = re.compile(
+    r'@(?P<kind>knowledge|skill):(?:"(?P<quoted>(?:\\.|[^"\\])*)"|(?P<plain>[^\s，。！？；：、]+))'
+)
+
+
+def _runtime_resource_mentions(query: str) -> tuple[list[str], list[str]]:
+    """解析消息中的知识库/Skill 引用，作为本次运行的临时资源选择。"""
+    knowledges: list[str] = []
+    skills: list[str] = []
+    for match in _MENTION_PATTERN.finditer(str(query or "")):
+        value = match.group("quoted") if match.group("quoted") is not None else match.group("plain")
+        value = re.sub(r'\\(["\\])', r'\1', value or "").strip()
+        if not value:
+            continue
+        target = knowledges if match.group("kind") == "knowledge" else skills
+        if value not in target:
+            target.append(value)
+    return knowledges, skills
+
+
+def _remove_running_task(run_id: str, task: asyncio.Task) -> None:
+    """只移除仍指向当前 task 的注册项，避免旧回调删掉新任务。"""
+    if _running.get(run_id) is task:
+        _running.pop(run_id, None)
 
 
 def _agent_run_timeout_seconds() -> float:
@@ -35,16 +65,75 @@ def _agent_run_timeout_seconds() -> float:
     return max(value, 1.0)
 
 
+async def _claim_pending_run(run_id: str) -> bool:
+    """按线程串行抢占 pending run，避免多实例并发执行同一线程。"""
+    async with async_session_factory() as db:
+        run_result = await db.execute(sa_text(
+            "SELECT thread_id, uid FROM agent_runs WHERE id=:rid FOR UPDATE"
+        ), {"rid": run_id})
+        run_row = run_result.fetchone()
+        if run_row is None:
+            await db.commit()
+            return False
+
+        # HTTP 层的 active 检查不是并发安全的；使用事务级 advisory lock
+        # 将同一 uid/thread 的“检查 + 抢占”序列化，锁不会跨请求泄漏。
+        await db.execute(sa_text(
+            "SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"
+        ), {"lock_key": f"datadeck:agent-run:{run_row[1]}:{run_row[0]}"})
+        now = utc_now_naive()
+        result = await db.execute(sa_text(
+            "UPDATE agent_runs AS candidate "
+            "SET status='running', started_at=:now, updated_at=:now "
+            "WHERE candidate.id=:rid AND candidate.status='pending' "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM agent_runs AS active "
+            "  WHERE active.thread_id=candidate.thread_id AND active.uid=candidate.uid "
+            "    AND active.id<>candidate.id "
+            "    AND active.status IN ('running','cancel_requested','interrupted')"
+            ") RETURNING candidate.id"
+        ), {"rid": run_id, "now": now})
+        claimed = result.fetchone() is not None
+        await db.commit()
+    return claimed
+
+
 async def recover_orphaned_agent_runs() -> int:
-    """服务重启后收敛失去后台 task 的运行记录，避免前端永久等待。"""
+    """回收没有心跳的运行记录，避免误伤其他实例的活跃 Run。
+
+    ``updated_at`` 由运行实例心跳维护；只回收超过一次运行超时并留有
+    宽限期的记录。这样多副本部署时，一个实例启动不会立即终止另一个
+    实例正在执行的任务。
+    """
+    now = utc_now_naive()
+    stale_after = max(60.0, _agent_run_timeout_seconds() + 30.0)
+    stale_before = now - timedelta(seconds=stale_after)
     async with async_session_factory() as db:
         result = await db.execute(sa_text(
             "UPDATE agent_runs SET status='failed', error_type='ServiceRestart', "
-            "error_message='服务重启导致 Agent 运行中断', finished_at=:now "
-            "WHERE status IN ('running','cancel_requested')"
-        ), {"now": utc_now_naive()})
+            "error_message='服务重启导致 Agent 运行中断', finished_at=:now, updated_at=:now "
+            "WHERE status IN ('running','cancel_requested') AND updated_at < :stale_before"
+        ), {"now": now, "stale_before": stale_before})
         await db.commit()
         return int(result.rowcount or 0)
+
+
+async def _heartbeat_agent_run(run_id: str) -> None:
+    """为本进程持有的运行租约续期。"""
+    interval = min(15.0, max(1.0, _agent_run_timeout_seconds() / 3.0))
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            async with async_session_factory() as db:
+                await db.execute(sa_text(
+                    "UPDATE agent_runs SET updated_at=:now "
+                    "WHERE id=:rid AND status='running'"
+                ), {"now": utc_now_naive(), "rid": run_id})
+                await db.commit()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Agent run %s heartbeat stopped: %s", run_id, exc)
 
 
 async def resume_pending_agent_runs() -> int:
@@ -109,10 +198,15 @@ async def create_agent_run(
     """
     if resume:
         r = await db.execute(sa_text(
-            "SELECT id FROM agent_runs WHERE id=:rid AND uid=:uid AND status='interrupted'"
-        ), {"rid": resume, "uid": uid})
+            "UPDATE agent_runs SET status='pending', started_at=NULL, finished_at=NULL, "
+        "error_type=NULL, error_message=NULL, updated_at=:now "
+        "WHERE id=:rid AND uid=:uid AND status='interrupted' "
+        "RETURNING id"
+        ), {"rid": resume, "uid": uid, "now": utc_now_naive()})
         if not r.fetchone():
             raise ValueError(f"待恢复的 run 不存在或状态不可恢复: {resume}")
+        # 必须在 dispatch 前提交状态，避免并发 resume 再次启动同一条执行链。
+        await db.commit()
         existing = await db.get(AgentRun, resume)
         if existing is None:
             raise ValueError(f"run 不存在: {resume}")
@@ -148,23 +242,75 @@ async def dispatch_run(
     run_id: str, *, resume_command: Command | None = None,
 ) -> None:
     """派发后台执行 task（幂等：同 run 已在运行则跳过）。"""
+    if _shutting_down:
+        return
     existing = _running.get(run_id)
     if existing is not None and not existing.done():
         return
     task = asyncio.create_task(_execute_run(run_id, resume_command=resume_command))
     _running[run_id] = task
-    task.add_done_callback(lambda _t: _running.pop(run_id, None))
+    task.add_done_callback(lambda completed: _remove_running_task(run_id, completed))
+
+
+async def shutdown_running_agent_runs() -> None:
+    """停止并等待进程内 Agent Run，确保数据库引擎关闭前归还连接。"""
+    global _shutting_down
+    _shutting_down = True
+    try:
+        tasks = [task for task in _running.values() if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        _running.clear()
+    finally:
+        _shutting_down = False
+
+
+async def _mark_run_failed_after_shutdown(run_id: str) -> None:
+    """将本实例因停机取消的运行立即收敛为失败并写入终态事件。"""
+    async with async_session_factory() as db:
+        result = await db.execute(sa_text(
+            "UPDATE agent_runs SET status='failed', error_type='ServiceRestart', "
+            "error_message='服务重启导致 Agent 运行中断', finished_at=:now, updated_at=:now "
+            "WHERE id=:rid AND status IN ('running','cancel_requested') "
+            "RETURNING thread_id"
+        ), {"now": utc_now_naive(), "rid": run_id})
+        row = result.fetchone()
+        await db.commit()
+    if row is None:
+        return
+    thread_id = row[0]
+    error_payload = {
+        "error": {
+            "message": "服务重启导致 Agent 运行中断",
+            "type": "ServiceRestart",
+        },
+    }
+    await append_event(run_id, "error", error_payload, thread_id)
+    await append_event(
+        run_id, "end", {"run": {"id": run_id, "status": "failed"}}, thread_id,
+    )
 
 
 async def _execute_run(run_id: str, *, resume_command: Command | None = None) -> None:
     """后台执行器：组装 agent + 真图流式翻译（细节在 event_translator）。"""
     from langchain_core.messages import HumanMessage
 
+    heartbeat_task: asyncio.Task | None = None
     try:
+        # dispatch_run 仅负责创建 task，真正执行前必须再次由数据库原子抢占。
+        # 这样多个应用实例同时恢复/派发时，只有一个实例能进入 Agent 图。
+        if not await _claim_pending_run(run_id):
+            logger.info("run %s was already claimed or is no longer pending", run_id)
+            return
+        heartbeat_task = asyncio.create_task(
+            _heartbeat_agent_run(run_id), name=f"agent-run-heartbeat:{run_id}"
+        )
         async with async_session_factory() as db:
             r = await db.execute(sa_text(
-                "SELECT r.thread_id, r.uid, r.input_payload, r.request_id, "
-                "t.tool_approval_mode, p.workdir_path, a.backend_id, a.config_json "
+                "SELECT r.thread_id, r.uid, r.agent_slug, r.input_payload, r.request_id, "
+                "t.tool_approval_mode, t.project_id, p.workdir_path, a.backend_id, a.config_json "
                 "FROM agent_runs r "
                 "JOIN threads t ON t.id=r.thread_id AND t.uid=r.uid "
                 "JOIN agents a ON a.slug=r.agent_slug "
@@ -176,7 +322,7 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
             async with async_session_factory() as db:
                 await db.execute(sa_text(
                     "UPDATE agent_runs SET status='failed', error_type='RunNotFound', "
-                    "error_message='Agent 运行上下文不存在', finished_at=:now "
+                    "error_message='Agent 运行上下文不存在', finished_at=:now, updated_at=:now "
                     "WHERE id=:rid AND status NOT IN ('completed','failed','cancelled')"
                 ), {"now": utc_now_naive(), "rid": run_id})
                 await db.commit()
@@ -185,25 +331,22 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
             })
             await append_event(run_id, "end", {"run": {"id": run_id, "status": "failed"}})
             return
-        (thread_id, uid, input_payload, request_id, tool_approval_mode,
-         workdir_path, agent_backend_id, agent_config) = row
-        agent_slug = str((input_payload or {}).get("agent_slug") or "default-chatbot")
+        (thread_id, uid, stored_agent_slug, input_payload, request_id, tool_approval_mode,
+         project_id, workdir_path, agent_backend_id, agent_config) = row
+        agent_slug = str(stored_agent_slug)
         query = (input_payload or {}).get("query", "")
         image_content = (input_payload or {}).get("image_content")
         model_spec = (input_payload or {}).get("model_spec") or ""
         logger.info(f"run {run_id} executor started: thread={thread_id}, model={model_spec or 'default'}")
 
-        # 任务分类路由提示（阶段二 2.2）：确定性预分类，辅助模型选工具；不确定则无提示
-        from datadeck.agents.middlewares.task_router import routing_hint
+        # 任务分类路由提示（阶段二 2.2）：仅注入内部运行上下文，不能拼入用户消息。
+        from datadeck.agents.middlewares.task_router import classify_query, routing_hint
         hint = routing_hint(query)
-        if hint:
-            query = f"[路由提示] {hint}\n\n{query}"
+        task_kind = classify_query(query) or ""
 
-        if agent_slug == "data-agent" or agent_backend_id == "DataAgent":
-            agent = await get_agent(agent_slug, agent_backend_id)
-        else:
-            # 保留通用 Agent 的原注入入口，兼容现有测试和宿主扩展。
-            agent = await get_chatbot_agent()
+        # 所有正式运行都通过同一个 Agent 选择入口；数据 Agent 与通用 Agent
+        # 只在 provider 内部按 backend_id 选择不同实现，运行服务不再分叉。
+        agent = await get_agent(agent_slug, agent_backend_id)
         context = agent.context_schema()
         configured_context = (agent_config or {}).get("context", agent_config or {})
         if isinstance(configured_context, dict):
@@ -215,51 +358,74 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
             "request_id": request_id,
             "model": model_spec or context.model,
             "agent_backend_id": agent_backend_id,
+            "routing_hint": hint,
+            "task_kind": task_kind,
         })
+        mentioned_knowledges, mentioned_skills = _runtime_resource_mentions(query)
+        if mentioned_knowledges:
+            configured_knowledges = context.get("knowledges")
+            context.knowledges = list(dict.fromkeys([
+                *(configured_knowledges or []), *mentioned_knowledges,
+            ]))
+        if mentioned_skills:
+            configured_skills = context.get("skills")
+            context.skills = list(dict.fromkeys([
+                *(configured_skills or []), *mentioned_skills,
+            ]))
         run_meta = (input_payload or {}).get("meta") or {}
         if isinstance(run_meta, dict):
+            attachment_ids = run_meta.get("attachment_file_ids")
+            if isinstance(attachment_ids, (list, tuple)):
+                context.attachment_file_ids = [
+                    str(item).strip() for item in attachment_ids if str(item).strip()
+                ]
             try:
                 context.subagent_depth = max(0, int(run_meta.get("subagent_depth", 0)))
             except (TypeError, ValueError):
                 context.subagent_depth = 0
-        context.tool_approval_mode = tool_approval_mode or "default"
+        context.tool_approval_mode = (
+            "none"
+            if settings.agent_allow_all_actions
+            else (tool_approval_mode or "default")
+        )
+        context.project_id = project_id
         context.workdir_path = workdir_path
-        configured_kb_id = getattr(context, "knowledge_base_id", None)
-        if not configured_kb_id:
-            # 前端使用 knowledges 资源配置；当前基础 RAG 一次运行只检索一个知识库，取首个选择项。
-            configured_knowledges = getattr(context, "knowledges", None)
-            if isinstance(configured_knowledges, (list, tuple)) and configured_knowledges:
-                configured_kb_id = configured_knowledges[0]
-        if configured_kb_id:
-            # 只按当前用户解析知识库，禁止通过 agent 配置越权指定 collection。
-            async with async_session_factory() as kb_db:
-                kb_row = await kb_db.execute(sa_text(
-                    "SELECT collection_name FROM knowledge_bases "
-                    "WHERE id=:kb_id AND uid=:uid LIMIT 1"
-                ), {"kb_id": str(configured_kb_id), "uid": uid})
-                kb = kb_row.fetchone()
-            if kb:
-                context.knowledge_base_collection = kb[0]
-            else:
-                context.knowledge_base_id = None
-                context.knowledge_base_collection = None
-        if not getattr(context, "knowledge_base_collection", None):
-            # 未显式绑定时使用当前用户最近更新的知识库，保证知识库上传后可直接被 Agent 检索。
-            async with async_session_factory() as kb_db:
-                kb_row = await kb_db.execute(sa_text(
-                    "SELECT id, collection_name FROM knowledge_bases "
-                    "WHERE uid=:uid ORDER BY updated_at DESC NULLS LAST, created_at DESC LIMIT 1"
-                ), {"uid": uid})
-                kb = kb_row.fetchone()
-            if kb:
-                context.knowledge_base_id = kb[0]
-                context.knowledge_base_collection = kb[1]
         if workdir_path:
             from server.services.workdir_service import resolve_authorized_workdir
 
-            context.workdir = (await resolve_authorized_workdir(
-                thread_id=thread_id, uid=uid, db=db
-            )).workdir
+            # 上面的上下文查询 session 已经离开 async with；工作目录授权必须
+            # 使用独立 session，不能把已关闭的 session 传入 Repository。
+            async with async_session_factory() as workdir_db:
+                context.workdir = (await resolve_authorized_workdir(
+                    thread_id=thread_id, uid=uid, db=workdir_db
+                )).workdir
+        else:
+            from server.workspace.temp_workdir import open_temporary_workdir
+
+            context.workdir = open_temporary_workdir(str(uid), str(thread_id))
+            context.workdir_path = context.workdir.relative_path
+        # 运行级资源只由宿主装配器解析一次；Agent 核心只消费 Context 快照。
+        from server.services.agent_runtime_assembler import assemble_agent_runtime
+        async with async_session_factory() as runtime_db:
+            runtime_user = await runtime_db.scalar(
+                sa_select(User).where(User.uid == uid, User.is_deleted == 0)
+            )
+            if runtime_user is None:
+                raise RuntimeError("Agent 运行用户不存在或已被禁用")
+            from server.deps import require_agent_access
+
+            await require_agent_access(runtime_db, runtime_user, agent_slug)
+            snapshot = await assemble_agent_runtime(
+                context, db=runtime_db, user=runtime_user, agent_slug=agent_slug
+            )
+            # 快照本身是 trace 的第一等事件，诊断事件单独发送便于前端筛选。
+            await append_event(run_id, "runtime_snapshot", {
+                "run_id": run_id,
+                "thread_id": thread_id,
+                "snapshot": snapshot.to_dict(),
+            }, thread_id)
+            for diagnostic in getattr(context, "_runtime_diagnostics", []) or []:
+                await append_event(run_id, "runtime_diagnostic", diagnostic, thread_id)
         graph = await agent.get_graph(context=context)
         logger.info(f"run {run_id} graph ready")
         try:
@@ -302,13 +468,49 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
                 timeout=_agent_run_timeout_seconds(),
             )
     except asyncio.CancelledError:
+        if _shutting_down:
+            try:
+                await _mark_run_failed_after_shutdown(run_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not finalize Agent run %s during shutdown: %s", run_id, exc)
         raise
+    except asyncio.TimeoutError:
+        error_message = "Agent 运行超时：模型或工具在限定时间内没有返回"
+        logger.error(f"run {run_id} executor timed out after {_agent_run_timeout_seconds()}s")
+        async with async_session_factory() as db:
+            await db.execute(sa_text(
+                "UPDATE agent_runs SET status='failed', error_type='TimeoutError', "
+                "error_message=:em, finished_at=:now, updated_at=:now WHERE id=:rid "
+                "AND status NOT IN ('completed','failed','cancelled')"
+            ), {"em": error_message, "now": utc_now_naive(), "rid": run_id})
+            await db.commit()
+        await append_event(run_id, "error", {
+            "error": {"message": error_message, "type": "TimeoutError"},
+        })
+        await append_event(run_id, "end", {"run": {"id": run_id, "status": "failed"}})
+    except RuntimeAssemblyError as exc:
+        diagnostic = exc.diagnostic.to_dict()
+        error_message = diagnostic["message"]
+        logger.error("run %s runtime assembly failed: %s", run_id, error_message)
+        async with async_session_factory() as db:
+            await db.execute(sa_text(
+                "UPDATE agent_runs SET status='failed', error_type=:et, error_message=:em, "
+                "finished_at=:now, updated_at=:now WHERE id=:rid "
+                "AND status NOT IN ('completed','failed','cancelled')"
+            ), {"et": diagnostic["code"], "em": error_message[:500],
+                "now": utc_now_naive(), "rid": run_id})
+            await db.commit()
+        await append_event(run_id, "runtime_diagnostic", diagnostic)
+        await append_event(run_id, "error", {
+            "error": {"message": error_message[:500], "type": diagnostic["code"]},
+        })
+        await append_event(run_id, "end", {"run": {"id": run_id, "status": "failed"}})
     except Exception as exc:  # noqa: BLE001
         logger.error(f"run {run_id} executor crashed: {exc}")
         async with async_session_factory() as db:
             await db.execute(sa_text(
                 "UPDATE agent_runs SET status='failed', error_type=:et, error_message=:em, "
-                "finished_at=:now WHERE id=:rid "
+                "finished_at=:now, updated_at=:now WHERE id=:rid "
                 "AND status NOT IN ('completed','failed','cancelled')"
             ), {"et": type(exc).__name__, "em": str(exc)[:500],
                 "now": utc_now_naive(), "rid": run_id})
@@ -318,6 +520,9 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
         })
         await append_event(run_id, "end", {"run": {"id": run_id, "status": "failed"}})
     finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
         await _dispatch_next_queued(run_id)
 
 
@@ -333,10 +538,14 @@ def build_resume_command(
     """
     if resume_payload is not None:
         return Command(resume=resume_payload)
-    supplied_decisions = (tool_approval or {}).get("decisions")
+    if not isinstance(tool_approval, dict):
+        raise ValueError("恢复 Run 必须提供审批决定或用户回答")
+    supplied_decisions = tool_approval.get("decisions")
     if isinstance(supplied_decisions, list) and supplied_decisions:
         return Command(resume={"decisions": supplied_decisions})
-    approved = bool((tool_approval or {}).get("approved", True))
+    approved = tool_approval.get("approved")
+    if not isinstance(approved, bool):
+        raise ValueError("审批结果必须包含 approved 布尔值或 decisions 列表")
     if approved:
         decisions: list[dict] = [{"type": "approve"}]
     else:
@@ -349,6 +558,8 @@ def build_resume_command(
 
 async def _dispatch_next_queued(completed_run_id: str) -> None:
     """同一线程串行执行 pending run；steer 请求优先于普通 enqueue。"""
+    if _shutting_down:
+        return
     async with async_session_factory() as db:
         r = await db.execute(sa_text(
             "SELECT thread_id, uid, status FROM agent_runs WHERE id=:rid"
@@ -381,25 +592,41 @@ async def request_cancel(run_id: str, uid: str) -> str:
     """取消 run：置 cancel_requested → 终态化 cancelled + 终态事件。"""
     async with async_session_factory() as db:
         r = await db.execute(sa_text(
-            "SELECT status FROM agent_runs WHERE id=:rid AND uid=:uid"
+            "SELECT thread_id, status FROM agent_runs WHERE id=:rid AND uid=:uid"
         ), {"rid": run_id, "uid": uid})
         row = r.fetchone()
         if not row:
             raise ValueError("Run 不存在")
-        if row[0] not in ("running", "pending", "cancel_requested"):
-            raise ValueError(f"Run 当前状态不可取消: {row[0]}")
+        thread_id, status = row
+        if status not in ("running", "pending", "cancel_requested", "interrupted"):
+            raise ValueError(f"Run 当前状态不可取消: {status}")
+
+        # 初始状态检查与终态迁移之间可能发生完成/失败；只有真正更新了
+        # 记录才允许发布 cancelled 事件，避免终态竞态制造矛盾 Trace。
+        updated = await db.execute(sa_text(
+            "UPDATE agent_runs SET status='cancelled', finished_at=:now, updated_at=:now "
+            "WHERE id=:rid AND uid=:uid AND status IN ('running','pending','cancel_requested','interrupted') "
+            "RETURNING status"
+        ), {"now": utc_now_naive(), "rid": run_id, "uid": uid})
+        if updated.fetchone() is None:
+            current = await db.scalar(sa_text(
+                "SELECT status FROM agent_runs WHERE id=:rid AND uid=:uid"
+            ), {"rid": run_id, "uid": uid})
+            await db.commit()
+            if current:
+                return str(current)
+            raise ValueError("Run 不存在")
+        await db.commit()
 
     task = _running.get(run_id)
     if task is not None and not task.done():
         task.cancel()
 
-    async with async_session_factory() as db:
-        await db.execute(sa_text(
-            "UPDATE agent_runs SET status='cancelled', finished_at=:now WHERE id=:rid "
-            "AND status NOT IN ('completed','failed','cancelled')"
-        ), {"now": utc_now_naive(), "rid": run_id})
-        await db.commit()
-    await append_event(run_id, "finished", {"run": {"id": run_id, "status": "cancelled"}})
-    await append_event(run_id, "end", {"run": {"id": run_id, "status": "cancelled"}})
+    await append_event(
+        run_id, "finished", {"run": {"id": run_id, "status": "cancelled"}}, thread_id,
+    )
+    await append_event(
+        run_id, "end", {"run": {"id": run_id, "status": "cancelled"}}, thread_id,
+    )
     await _dispatch_next_queued(run_id)
     return "cancelled"

@@ -1,6 +1,6 @@
 """任务分类路由（阶段二 2.2）：确定性关键词预分类，注入 prompt 辅助工具选择。
 
-四类：metric（口径）/ schema（结构）/ data（取数）/ chat（闲聊）。
+五类：sync（同步）/ metric（口径）/ schema（结构）/ data（取数）/ chat（闲聊）。
 纯规则、零 LLM 成本；分类不确定时返回 None，不干扰模型自主决策。
 """
 
@@ -17,6 +17,7 @@ SCHEMA_PAT = re.compile(
 DATA_PAT = re.compile(
     r"查询|查一下|帮我查|多少|几条|统计|汇总|列出|取数|明细|count|sum|avg|group by|最近|top"
 )
+SYNC_PAT = re.compile(r"同步|db2hive|datax|data.?x|建数仓表|生成同步", re.IGNORECASE)
 CHAT_PAT = re.compile(r"^(你好|您好|hi|hello|嗨|在吗|谢谢|你是谁|介绍一下你自己)", re.IGNORECASE)
 
 
@@ -27,6 +28,8 @@ def classify_query(query: str) -> str | None:
         return None
     if CHAT_PAT.match(q):
         return "chat"
+    if SYNC_PAT.search(q):
+        return "sync"
     if METRIC_PAT.search(q):
         return "metric"
     if SCHEMA_PAT.search(q):
@@ -37,6 +40,7 @@ def classify_query(query: str) -> str | None:
 
 
 _HINTS = {
+    "sync": "本问题判定为【同步任务】→ 只使用已授权的 dba Skill；禁止调用 OMD、RAG、SQL 查询和指标工具。若 dba Skill 不可用，直接说明原因并停止。",
     "metric": "本问题判定为【口径/概念类】→ 优先 rag_search 检索知识库作答，检索无果再通用回答。",
     "schema": "本问题判定为【表结构/元数据类】→ 优先 omd_* 工具查询真实元数据，禁止凭记忆编表名字段。",
     "data": "本问题判定为【取数类】→ 先 omd_get_table_schema 确认结构，再 sql_execute_query 执行并给出真实数值。",

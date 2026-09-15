@@ -1,14 +1,22 @@
 import { unref } from 'vue'
 import { agentApi } from '@/apis'
-import { handleChatError } from '@/utils/errorHandler'
 import { isSteerableMainChatRun } from '@/utils/agentRun'
 import { compareRunSeq, normalizeRunSeq, resolveRunResumeAfterSeq } from '@/utils/runStreamResume'
 import { hasPendingInterruptPayload } from '@/utils/toolApproval'
 
 const RUN_INTERRUPTED_STATUS = 'interrupted'
 const RUN_TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled'])
+const RUN_RECONNECT_MAX_DELAY_MS = 10000
 const ACTIVE_RUN_STORAGE_TTL_MS = 60 * 60 * 1000
 const ACTIVE_RUN_CLIENT_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+
+const resolveFailureMessage = (value) => {
+  if (typeof value === 'string' && value.trim()) return value.trim()
+  if (!value || typeof value !== 'object') return ''
+  return String(
+    value.error_message || value.message || value.error?.message || value.detail || ''
+  ).trim()
+}
 
 const getActiveRunStorageKey = (threadId) => `active_run:${threadId}`
 
@@ -138,6 +146,10 @@ export function useAgentRunStream({
     const ts = getThreadState(threadId)
     if (!ts) return
     streamSmoother?.flushThread(threadId)
+    if (ts.runReconnectTimer) {
+      clearTimeout(ts.runReconnectTimer)
+      ts.runReconnectTimer = null
+    }
     if (ts.runStreamAbortController) {
       ts.runStreamAbortController.abort()
       ts.runStreamAbortController = null
@@ -247,12 +259,20 @@ export function useAgentRunStream({
   const scheduleRunReconnect = (threadId, runId, delay = 500) => {
     const ts = getThreadState(threadId)
     if (!ts || ts.activeRunId !== runId) return
-    setTimeout(() => {
+    if (ts.runReconnectTimer) return
+    ts.runReconnectAttempt = Number(ts.runReconnectAttempt || 0) + 1
+    const retryDelay = Math.min(
+      Math.max(delay, 500) * 2 ** Math.min(ts.runReconnectAttempt - 1, 4),
+      RUN_RECONNECT_MAX_DELAY_MS
+    )
+    ts.runConnectionStatus = 'reconnecting'
+    ts.runReconnectTimer = setTimeout(() => {
+      ts.runReconnectTimer = null
       const latest = getThreadState(threadId)
       if (latest?.activeRunId === runId && !latest.runStreamAbortController) {
         void startRunStream(threadId, runId, latest.runLastSeq)
       }
-    }, delay)
+    }, retryDelay)
   }
 
   const startRunStream = async (threadId, runId, afterSeq = '0-0', options = {}) => {
@@ -261,6 +281,10 @@ export function useAgentRunStream({
     if (!ts) return
 
     const isSameRun = ts.activeRunId === runId
+    // 页面切换、历史会话恢复和状态轮询可能同时尝试恢复同一个 Run。
+    // 同一 Run 只允许一个 SSE 订阅，否则后启动的订阅会取消前一个订阅，
+    // 但后台 Run 仍会继续执行，最终造成前端一直显示 loading。
+    if (isSameRun && ts.runStreamAbortController) return
     const initialSteerable = options.steerable ?? (isSameRun && ts.activeRunSteerable === true)
     stopRunStreamSubscription(threadId)
     const runController = new AbortController()
@@ -268,6 +292,15 @@ export function useAgentRunStream({
     ts.activeRunId = runId
     ts.activeRunSteerable = initialSteerable
     ts.runLastSeq = normalizeRunSeq(afterSeq)
+    ts.runConnectionStatus = 'connecting'
+    ts.runLastError = ''
+    ts.runFailureMessage = ''
+    const continuingSameRun = isSameRun && normalizeRunSeq(afterSeq) !== '0-0'
+    if (!continuingSameRun) {
+      ts.traceEvents = []
+      ts.runtimeSnapshot = null
+      ts.runtimeDiagnostics = []
+    }
     ts.lastRetryableJobTry = null
     ts.isStreaming = true
     saveActiveRunSnapshot(threadId, runId, ts.runLastSeq)
@@ -284,6 +317,8 @@ export function useAgentRunStream({
       if (!response.ok) {
         throw new Error(`SSE response not ok: ${response.status}`)
       }
+      ts.runConnectionStatus = 'connected'
+      ts.runReconnectAttempt = 0
 
       await processRunSseResponse(response, (event, data, eventId) => {
         if (!data || ts.activeRunId !== runId) return
@@ -296,6 +331,23 @@ export function useAgentRunStream({
         }
 
         const payload = data.payload || {}
+        if (event === 'runtime_snapshot') {
+          handleStreamChunk({
+            status: 'runtime_snapshot',
+            snapshot: payload.snapshot,
+            runtime_snapshot: payload.snapshot,
+            run_id: runId,
+            thread_id: threadId
+          }, threadId)
+        } else if (event === 'runtime_diagnostic') {
+          handleStreamChunk({
+            status: 'runtime_diagnostic',
+            diagnostic: payload,
+            ...payload,
+            run_id: runId,
+            thread_id: threadId
+          }, threadId)
+        }
         if (event === 'metadata') {
           ts.activeRunSteerable = isSteerableMainChatRun({
             status: 'running',
@@ -362,6 +414,13 @@ export function useAgentRunStream({
 
         if (event === 'end') {
           sawTerminalEvent = true
+          if (terminalStatus === 'failed') {
+            ts.runFailureMessage =
+              resolveFailureMessage(payload) ||
+              resolveFailureMessage(payload.chunk) ||
+              ts.runFailureMessage ||
+              'Agent 执行失败'
+          }
           if (terminalStatus === RUN_INTERRUPTED_STATUS) {
             finalizeRunStream(threadId, runId, touchedThreadIds, { status: terminalStatus })
           } else if (RUN_TERMINAL_STATUSES.has(terminalStatus)) {
@@ -374,6 +433,11 @@ export function useAgentRunStream({
 
         if (event === 'error') {
           sawTerminalEvent = true
+          ts.runFailureMessage =
+            resolveFailureMessage(payload) ||
+            resolveFailureMessage(payload.chunk) ||
+            ts.runFailureMessage ||
+            'Agent 执行失败'
           finalizeRunStream(threadId, runId, touchedThreadIds, { delay: 300, scroll: true })
         }
       })
@@ -381,7 +445,7 @@ export function useAgentRunStream({
       if (!sawTerminalEvent && !runController.signal.aborted && ts.activeRunId === runId) {
         try {
           const runRes = await agentApi.getAgentRun(runId)
-          const run = runRes?.run
+          const run = runRes
           if (run?.status === RUN_INTERRUPTED_STATUS) {
             if (hasPendingInterruptInThreads(touchedThreadIds, run.id)) {
               await preserveInterruptedRun(threadId, run)
@@ -389,6 +453,9 @@ export function useAgentRunStream({
               finalizeRunStream(threadId, runId, touchedThreadIds, { status: run.status })
             }
           } else if (run && RUN_TERMINAL_STATUSES.has(run.status)) {
+            if (run.status === 'failed') {
+              ts.runFailureMessage = resolveFailureMessage(run) || 'Agent 执行失败'
+            }
             finalizeRunStream(threadId, runId, touchedThreadIds, { status: run.status })
           } else {
             scheduleRunReconnect(threadId, runId)
@@ -404,9 +471,31 @@ export function useAgentRunStream({
     } catch (error) {
       if (error?.name !== 'AbortError') {
         streamSmoother?.flushThread(threadId)
-        console.error('Run SSE stream error:', error)
-        handleChatError(error, 'stream')
-        scheduleRunReconnect(threadId, runId)
+        ts.runConnectionStatus = 'disconnected'
+        ts.runLastError = error?.message || '连接中断'
+        console.error('Run SSE stream error; run will be resumed from persisted cursor:', error)
+        // SSE 断开不代表后台 Run 失败。查询持久化状态，只有未结束时才退避重连。
+        try {
+          const runRes = await agentApi.getAgentRun(runId)
+          const run = runRes
+          if (run?.status === RUN_INTERRUPTED_STATUS) {
+            if (hasPendingInterruptInThreads(touchedThreadIds, run.id)) {
+              await preserveInterruptedRun(threadId, run)
+            } else {
+              finalizeRunStream(threadId, runId, touchedThreadIds, { status: run.status })
+            }
+          } else if (run && RUN_TERMINAL_STATUSES.has(run.status)) {
+            if (run.status === 'failed') {
+              ts.runFailureMessage = resolveFailureMessage(run) || 'Agent 执行失败'
+            }
+            finalizeRunStream(threadId, runId, touchedThreadIds, { status: run.status })
+          } else {
+            scheduleRunReconnect(threadId, runId)
+          }
+        } catch (statusError) {
+          console.warn('Run status check failed while recovering SSE:', statusError)
+          scheduleRunReconnect(threadId, runId)
+        }
       }
     } finally {
       if (ts.runStreamAbortController === runController) {
@@ -429,7 +518,7 @@ export function useAgentRunStream({
       if (!ts.activeRunId) return
       try {
         const runRes = await agentApi.getAgentRun(ts.activeRunId)
-        const run = runRes?.run
+        const run = runRes
         if (run?.status === RUN_INTERRUPTED_STATUS) {
           stopRunStreamSubscription(threadId)
           const snapshot = loadActiveRunSnapshot(threadId)
@@ -463,7 +552,7 @@ export function useAgentRunStream({
       } else {
         try {
           const runRes = await agentApi.getAgentRun(snapshot.run_id)
-          const run = runRes?.run
+          const run = runRes
           if (run?.status === RUN_INTERRUPTED_STATUS) {
             // 仅当本地仍持有该中断时才据快照恢复；否则不能仅凭快照重放旧中断
             // （可能已被回复），交由下方 active_run 做权威判定。
@@ -517,6 +606,9 @@ export function useAgentRunStream({
     ts.activeRunId = null
     ts.activeRunSteerable = false
     ts.runLastSeq = '0-0'
+    ts.runConnectionStatus = 'idle'
+    ts.runReconnectAttempt = 0
+    ts.runLastError = ''
     ts.isStreaming = false
     ts.replyLoadingVisible = false
     ts.pendingRequestId = null
@@ -528,6 +620,15 @@ export function useAgentRunStream({
   return {
     startRunStream,
     resumeActiveRunForThread,
-    stopRunStreamSubscription
+    stopRunStreamSubscription,
+    retryRunStream: async (threadId) => {
+      const ts = getThreadState(threadId)
+      if (!ts?.activeRunId) return false
+      stopRunStreamSubscription(threadId)
+      await startRunStream(threadId, ts.activeRunId, ts.runLastSeq, {
+        steerable: ts.activeRunSteerable
+      })
+      return true
+    }
   }
 }

@@ -12,6 +12,7 @@ export const useUserStore = defineStore('user', () => {
   const phoneNumber = ref('')
   const avatar = ref('')
   const userRole = ref('')
+  const permissions = ref([])
   const departmentId = ref(null)
   const departmentName = ref('')
 
@@ -19,6 +20,7 @@ export const useUserStore = defineStore('user', () => {
   const isLoggedIn = computed(() => !!token.value)
   const isAdmin = computed(() => userRole.value === 'admin' || userRole.value === 'superadmin')
   const isSuperAdmin = computed(() => userRole.value === 'superadmin')
+  const canAccess = (module) => isSuperAdmin.value || permissions.value.includes(module)
 
   // 动作
   function applySession(data) {
@@ -29,6 +31,7 @@ export const useUserStore = defineStore('user', () => {
     phoneNumber.value = data.phone_number || ''
     avatar.value = data.avatar || ''
     userRole.value = data.role
+    permissions.value = Array.isArray(data.permissions) ? data.permissions : []
     departmentId.value = data.department_id || null
     departmentName.value = data.department_name || ''
     localStorage.setItem('user_token', data.access_token)
@@ -37,6 +40,10 @@ export const useUserStore = defineStore('user', () => {
   async function login(credentials) {
     try {
       const data = await authApi.login(credentials)
+      // 切换账号时立即丢弃上一个账号的 Agent 配置和资源缓存。
+      if (uid.value && uid.value !== data.uid) {
+        useAgentStore().reset()
+      }
       applySession(data)
       return true
     } catch (error) {
@@ -54,6 +61,7 @@ export const useUserStore = defineStore('user', () => {
     phoneNumber.value = ''
     avatar.value = ''
     userRole.value = ''
+    permissions.value = []
     departmentId.value = null
     departmentName.value = ''
 
@@ -160,8 +168,7 @@ export const useUserStore = defineStore('user', () => {
       const data = await authApi.uploadAvatar(file)
 
       // 更新本地头像状态
-      // 头像接口返回字段为 avatar；兼容旧接口曾使用的 avatar_url。
-      avatar.value = data.avatar || data.avatar_url || ''
+      avatar.value = data.avatar || ''
 
       return data
     } catch (error) {
@@ -182,6 +189,7 @@ export const useUserStore = defineStore('user', () => {
       phoneNumber.value = userData.phone_number || ''
       avatar.value = userData.avatar || ''
       userRole.value = userData.role
+      permissions.value = Array.isArray(userData.permissions) ? userData.permissions : []
       departmentId.value = userData.department_id || null
       departmentName.value = userData.department_name || ''
 
@@ -221,6 +229,7 @@ export const useUserStore = defineStore('user', () => {
     phoneNumber,
     avatar,
     userRole,
+    permissions,
     departmentId,
     departmentName,
 
@@ -228,6 +237,7 @@ export const useUserStore = defineStore('user', () => {
     isLoggedIn,
     isAdmin,
     isSuperAdmin,
+    canAccess,
 
     // 方法
     login,

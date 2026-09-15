@@ -120,12 +120,8 @@ const currentImage = ref(null)
 const placeholder = '问点什么？使用 @ 可以选择文件、知识库或技能进行引用。'
 
 const previewAttachments = computed(() => normalizeAttachmentPreviews(props.attachments))
-const showInputOptions = computed(
-  () =>
-    props.supportsFileUpload ||
-    Boolean(props.mention?.knowledgeBases?.length) ||
-    Boolean(props.mention?.skills?.length)
-)
+// 保留添加内容入口；即使当前智能体没有可添加资源，审批模式仍需显示。
+const showInputOptions = computed(() => true)
 
 const updateValue = (val) => {
   emit('update:modelValue', val)

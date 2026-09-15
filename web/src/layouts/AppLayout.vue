@@ -21,7 +21,7 @@ import { useConfigStore } from '@/stores/config'
 import { useAgentStore } from '@/stores/agent'
 import { useChatThreadsStore } from '@/stores/chatThreads'
 import { useChatUIStore } from '@/stores/chatUI'
-import { useDatabaseStore } from '@/stores/database'
+import { knowledgeBaseApi } from '@/apis/knowledge_api'
 import { useInfoStore } from '@/stores/info'
 import { useProjectsStore } from '@/stores/projects'
 import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
@@ -40,7 +40,6 @@ const configStore = useConfigStore()
 const agentStore = useAgentStore()
 const chatThreadsStore = useChatThreadsStore()
 const chatUIStore = useChatUIStore()
-const databaseStore = useDatabaseStore()
 const infoStore = useInfoStore()
 const projectsStore = useProjectsStore()
 const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
@@ -67,6 +66,8 @@ const openSettingsModal = (tab) => {
 }
 
 const getRemoteConfig = async () => {
+  // 系统配置包含全局设置，仅管理员可读取；普通角色不应产生无意义的 403。
+  if (!userStore.isAdmin) return
   try {
     await configStore.refreshConfig()
   } catch (error) {
@@ -78,7 +79,7 @@ const getRemoteDatabase = async () => {
   await runtimeCapabilitiesStore.ensureLoaded()
   if (!knowledgeEnabled.value) return
   try {
-    await databaseStore.loadDatabases()
+    await knowledgeBaseApi.list()
   } catch (error) {
     console.warn('加载知识库列表失败:', error)
   }
@@ -145,40 +146,39 @@ const projectAvatar = computed(() => '/logo.png')
 
 // 下面是导航菜单部分，添加智能体项
 const mainList = computed(() => {
-  const items = [
-    {
+  const items = []
+  if (userStore.canAccess('conversations')) items.push({
       name: '新建对话',
       path: '/agent',
       icon: MessageCirclePlus,
       activeIcon: MessageCirclePlus,
       action: true,
       exactActive: true
-    }
-  ]
+  })
 
-  items.push({
+  if (userStore.canAccess('agents')) items.push({
     name: '智能体',
     path: '/agent-manage',
     icon: Box,
     activeIcon: Box
   })
 
-  items.push({
+  if (userStore.canAccess('workspace')) items.push({
     name: '个人空间',
     path: '/workspace',
     icon: HardDrive,
     activeIcon: HardDrive
   })
 
-  items.push({
-    name: knowledgeEnabled.value && userStore.isAdmin ? '知识库' : '技能',
-    path: knowledgeEnabled.value && userStore.isAdmin ? '/knowledge' : '/extensions',
-    activePaths: knowledgeEnabled.value && userStore.isAdmin ? ['/knowledge'] : ['/extensions'],
+  if (knowledgeEnabled.value && userStore.canAccess('knowledge')) items.push({
+    name: '知识库',
+    path: '/knowledge',
+    activePaths: ['/knowledge'],
     icon: Database,
     activeIcon: Database
   })
 
-  if (knowledgeEnabled.value && userStore.isAdmin) items.push({
+  if (userStore.canAccess('extensions')) items.push({
     name: '技能与工具',
     path: '/extensions',
     activePaths: ['/extensions'],
@@ -186,7 +186,7 @@ const mainList = computed(() => {
     activeIcon: LibraryBig
   })
 
-  if (scheduledTasksEnabled.value && userStore.isAdmin) items.push({
+  if (scheduledTasksEnabled.value && userStore.canAccess('scheduled_tasks')) items.push({
     name: '定时任务',
     path: '/scheduled-tasks',
     activePaths: ['/scheduled-tasks'],
@@ -194,7 +194,7 @@ const mainList = computed(() => {
     activeIcon: Clock
   })
 
-  if (userStore.isAdmin) items.push({
+  if (userStore.canAccess('metrics')) items.push({
     name: '指标口径',
     path: '/metrics',
     activePaths: ['/metrics'],
@@ -202,7 +202,7 @@ const mainList = computed(() => {
     activeIcon: ListChecks
   })
 
-  if (userStore.isSuperAdmin) {
+  if (userStore.canAccess('dashboard')) {
     items.push({
       name: '数据总览',
       path: '/dashboard',
@@ -259,7 +259,7 @@ const loadProjects = async () => {
 const handleSelectChat = (threadId) => {
   if (!threadId) return
   if (!chatThreadsStore.setCurrentThreadId(threadId)) return
-  router.push({ name: 'AgentCompWithThreadId', params: { thread_id: threadId } })
+  router.push({ name: 'AgentComp', params: { thread_id: threadId } })
 }
 
 const handleSearchThreadFound = (thread) => {
@@ -274,7 +274,7 @@ const handleSearchSelectThread = (thread) => {
 
 const handleCreateConversationFromSearch = () => {
   if (!chatThreadsStore.setCurrentThreadId(null)) return
-  router.push({ name: 'AgentComp' })
+  router.push({ name: 'AgentComp', params: { thread_id: undefined } })
 }
 
 const searchWorkspace = (query) => searchWorkspaceFiles(query)
@@ -290,7 +290,7 @@ const handleDeleteChat = async (threadId) => {
   try {
     await chatThreadsStore.deleteThread(threadId)
     if (route.params.thread_id === threadId) {
-      await router.replace({ name: 'AgentComp' })
+      await router.replace({ name: 'AgentComp', params: { thread_id: undefined } })
     }
   } catch (error) {
     console.warn('删除对话失败:', error)
@@ -341,7 +341,7 @@ const handleDeleteProject = async (projectId) => {
     const removedThreadIds = chatThreadsStore.removeThreadsByProject(projectId)
     projectsStore.removeProject(projectId)
     if (removedThreadIds.includes(route.params.thread_id)) {
-      await router.replace({ name: 'AgentComp' })
+      await router.replace({ name: 'AgentComp', params: { thread_id: undefined } })
     }
     message.success('项目及其中对话已删除，项目文件夹已保留')
   } catch (error) {

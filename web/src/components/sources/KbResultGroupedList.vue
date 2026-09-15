@@ -16,15 +16,6 @@
           <span class="chunk-count">{{ fileGroup.chunks.length }} 个片段</span>
         </button>
         <div class="file-actions">
-          <button
-            v-if="fileGroup.kb_id && fileGroup.file_id"
-            class="view-file-btn"
-            @click.stop="openFileDetail(fileGroup)"
-            title="查看完整文件"
-            aria-label="查看完整文件"
-          >
-            <Eye :size="14" />
-          </button>
         </div>
       </div>
     </div>
@@ -35,19 +26,13 @@
 
     <KbFileChunksModal v-model:open="chunksModalVisible" :file-group="selectedFileGroup" />
 
-    <FileDetailModal
-      v-model:open="fileDetailOpen"
-      :kb-id="fileDetailKbId"
-      :file-id="fileDetailFileId"
-    />
   </div>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
-import { FileText, Eye } from '@lucide/vue'
+import { FileText } from '@lucide/vue'
 import KbFileChunksModal from './KbFileChunksModal.vue'
-import FileDetailModal from '@/components/FileDetailModal.vue'
 import { groupKnowledgeChunks } from '@/utils/kbResultGroups.js'
 
 const props = defineProps({
@@ -67,9 +52,6 @@ const props = defineProps({
 
 const chunksModalVisible = ref(false)
 const selectedFileGroup = ref(null)
-const fileDetailOpen = ref(false)
-const fileDetailKbId = ref('')
-const fileDetailFileId = ref('')
 
 const resolveChunks = (input) => {
   if (Array.isArray(input)) return input
@@ -120,11 +102,6 @@ const openFileChunksModal = (fileGroup) => {
   chunksModalVisible.value = true
 }
 
-const openFileDetail = (fileGroup) => {
-  fileDetailKbId.value = fileGroup.kb_id || ''
-  fileDetailFileId.value = fileGroup.file_id || ''
-  fileDetailOpen.value = Boolean(fileDetailKbId.value && fileDetailFileId.value)
-}
 </script>
 
 <style scoped lang="less">

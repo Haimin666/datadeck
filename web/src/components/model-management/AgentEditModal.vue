@@ -1,18 +1,21 @@
 <script setup>
-import { computed, nextTick, reactive, ref } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
+import { useRouter } from 'vue-router'
 import {
   Bot,
   Microscope,
   RefreshCw,
-  Settings2,
   SlidersHorizontal,
   Upload,
-  Wrench
+  Wrench,
+  Workflow
 } from '@lucide/vue'
 
 import { userApi } from '@/apis/user_api'
 import AgentRuntimeConfigForm from '@/components/AgentRuntimeConfigForm.vue'
+import AgentCreationConfig from '@/components/model-management/AgentCreationConfig.vue'
+import AgentWorkflowCanvas from '@/components/model-management/AgentWorkflowCanvas.vue'
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { isBuiltinAgent, useAgentStore } from '@/stores/agent'
@@ -28,10 +31,10 @@ const emit = defineEmits(['saved'])
 
 const userStore = useUserStore()
 const agentStore = useAgentStore()
+const router = useRouter()
 
 const DEFAULT_AGENT_BACKEND_ID = 'ChatbotAgent'
-const SUB_AGENT_BACKEND_ID = 'SubAgentBackend'
-const runtimeAgentModalTabs = ['model', 'tools', 'other']
+const runtimeAgentModalTabs = ['model', 'tools', 'workflow']
 
 const showAgentModal = ref(false)
 const editingAgentId = ref(null)
@@ -43,16 +46,21 @@ const runtimeConfigFormRef = ref(null)
 const agentNameInputRef = ref(null)
 const agentShareConfig = ref({
   version: 2,
-  read_scope: { access_level: 'user', department_ids: [], user_uids: [] },
+  read_scope: { access_level: 'user', user_uids: [] },
   manage_scope: null
 })
 const agentForm = reactive({
   slug: '',
   name: '',
   backend_id: DEFAULT_AGENT_BACKEND_ID,
+  execution_role: 'standalone',
+  delegation_enabled: false,
   description: '',
   icon: ''
 })
+const draftConfigItems = ref({})
+const draftConfigLoading = ref(false)
+const draftAgentConfig = ref({})
 
 // 基本配置的原始基线，用于在标题栏显示「有修改」状态。slug / backend_id
 // 仅在创建模式可编辑，因此新建时不参与比对。
@@ -71,7 +79,6 @@ const cloneShareConfig = (share) => {
     scope
       ? {
           access_level: scope.access_level,
-          department_ids: [...(scope.department_ids || [])],
           user_uids: [...(scope.user_uids || [])]
         }
       : null
@@ -87,7 +94,7 @@ const snapshotShareConfig = () => {
   if (isBuiltinAgent({ id: editingAgentId.value })) {
     return cloneShareConfig({
       version: 2,
-      read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
+      read_scope: { access_level: 'global', user_uids: [] },
       manage_scope: null
     })
   }
@@ -101,13 +108,11 @@ const stringifyShareConfig = (share) => {
     version: share.version,
     read_scope: {
       access_level: share.read_scope?.access_level || null,
-      department_ids: sortIds(share.read_scope?.department_ids),
       user_uids: sortIds(share.read_scope?.user_uids)
     },
     manage_scope: share.manage_scope
       ? {
           access_level: share.manage_scope.access_level,
-          department_ids: sortIds(share.manage_scope.department_ids),
           user_uids: sortIds(share.manage_scope.user_uids)
         }
       : null
@@ -148,13 +153,18 @@ const normalizeAgent = (agent) => {
 
 const agentModalMenuItems = computed(() => {
   const items = [{ key: 'basic', label: '基本信息', icon: Bot }]
-  if (editingAgentId.value) {
+  if (!editingAgentId.value) {
     items.push(
-      { key: 'model', label: '模型配置', icon: SlidersHorizontal },
-      { key: 'tools', label: '工具配置', icon: Wrench },
-      { key: 'other', label: '其他配置', icon: Settings2 }
+      { key: 'tools', label: '能力与资源', icon: Wrench },
+      { key: 'workflow', label: '编排', icon: Workflow }
     )
+    return items
   }
+  items.push(
+    { key: 'model', label: '模型配置', icon: SlidersHorizontal },
+    { key: 'tools', label: '工具包配置', icon: Wrench },
+    { key: 'workflow', label: '编排', icon: Workflow }
+  )
   return items
 })
 
@@ -164,13 +174,37 @@ const runtimeConfigSegment = computed(() =>
 )
 const isRuntimeAgentModalTab = (key) => runtimeAgentModalTabs.includes(key)
 const getDefaultBackendId = () => DEFAULT_AGENT_BACKEND_ID
-const isSubAgentBackend = (backendId) => backendId === SUB_AGENT_BACKEND_ID
+const isSubagent = computed(() => agentForm.execution_role === 'subagent')
+const workflowConfig = computed(() =>
+  editingAgentId.value ? agentStore.agentConfig : draftAgentConfig.value
+)
+const workflowSubagents = computed(() => {
+  const items = editingAgentId.value ? agentStore.configurableItems : draftConfigItems.value
+  return items?.subagents?.options || []
+})
+
+const updateWorkflow = (workflow) => {
+  const next = workflow?.nodes?.length ? workflow : null
+  if (editingAgentId.value) agentStore.updateAgentConfig({ subagent_workflow: next })
+  else draftAgentConfig.value = { ...draftAgentConfig.value, subagent_workflow: next }
+  agentForm.delegation_enabled = Boolean(next)
+}
+
+const updateWorkflowSubagents = (subagents) => {
+  if (editingAgentId.value) agentStore.updateAgentConfig({ subagents })
+  else draftAgentConfig.value = { ...draftAgentConfig.value, subagents }
+}
+
+const openWorkflowTab = () => {
+  if (!editingAgentId.value) return
+  showAgentModal.value = false
+  router.push({ name: 'agent-manage', query: { tab: 'orchestration', agent: editingAgentId.value } })
+}
 
 const getInitialShareConfig = () => ({
   version: 2,
   read_scope: {
     access_level: 'user',
-    department_ids: [],
     user_uids: userStore.uid ? [userStore.uid] : []
   },
   manage_scope: null
@@ -180,7 +214,7 @@ const normalizeShareConfigForPayload = () => {
   if (isBuiltinAgent({ id: editingAgentId.value })) {
     return {
       version: 2,
-      read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
+      read_scope: { access_level: 'global', user_uids: [] },
       manage_scope: null
     }
   }
@@ -225,11 +259,36 @@ const resetAgentForm = () => {
     slug: '',
     name: '',
     backend_id: getDefaultBackendId(),
+    execution_role: 'standalone',
+    delegation_enabled: false,
     description: '',
     icon: '',
     ...defaults
   })
   agentShareConfig.value = getInitialShareConfig()
+  draftConfigItems.value = {}
+  draftAgentConfig.value = {}
+}
+
+const loadDraftConfig = async () => {
+  draftConfigLoading.value = true
+  try {
+    const items = await agentStore.fetchConfigurableItems(agentForm.backend_id)
+    draftConfigItems.value = items
+    const config = {}
+    Object.entries(items).forEach(([key, item]) => {
+      if (item.kind === 'llm') config[key] = item.default || ''
+      else if (item.type === 'list') {
+        config[key] = (item.options || []).filter((option) => option.fixed).map((option) => option.slug)
+      }
+      else if (item.default !== undefined) config[key] = item.default
+    })
+    draftAgentConfig.value = config
+  } catch (error) {
+    message.error(error.message || '加载可选能力失败')
+  } finally {
+    draftConfigLoading.value = false
+  }
 }
 
 const focusAgentNameInput = async () => {
@@ -255,8 +314,16 @@ const openCreate = () => {
   resetAgentForm()
   agentStore.resetAgentConfig()
   showAgentModal.value = true
+  loadDraftConfig()
   focusAgentNameInput()
 }
+
+watch(
+  () => agentForm.execution_role,
+  (role) => {
+    if (role === 'subagent') agentForm.delegation_enabled = false
+  }
+)
 
 const openEdit = async (agent) => {
   const agentId = typeof agent === 'string' ? agent : agent?.id
@@ -274,13 +341,15 @@ const openEdit = async (agent) => {
     slug: detail.id || detail.slug || '',
     name: detail.name || '',
     backend_id: detail.backend_id || DEFAULT_AGENT_BACKEND_ID,
+    execution_role: detail.execution_role || 'standalone',
+    delegation_enabled: Boolean(detail.delegation_enabled),
     description: detail.description || '',
     icon: detail.icon || ''
   })
   agentShareConfig.value = isBuiltinAgent(detail)
     ? {
         version: 2,
-        read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
+        read_scope: { access_level: 'global', user_uids: [] },
         manage_scope: null
       }
     : detail.share_config || getInitialShareConfig()
@@ -290,8 +359,8 @@ const openEdit = async (agent) => {
 }
 
 const restoreChatAgentSelectionIfNeeded = async () => {
-  if (!agentStore.selectedAgent?.is_subagent) return
-  const fallbackAgentId = (agentStore.agents || []).find((agent) => !agent.is_subagent)?.id
+  if (agentStore.selectedAgent?.execution_role !== 'subagent') return
+  const fallbackAgentId = (agentStore.agents || []).find((agent) => agent.execution_role !== 'subagent')?.id
   if (fallbackAgentId) await agentStore.selectAgent(fallbackAgentId)
 }
 
@@ -335,12 +404,14 @@ const buildAgentPayload = () => {
     description: agentForm.description.trim() || null,
     icon: agentForm.icon.trim() || null,
     share_config: normalizeShareConfigForPayload(),
-    is_subagent: isSubAgentBackend(agentForm.backend_id)
+    execution_role: agentForm.execution_role,
+    delegation_enabled: agentForm.execution_role === 'standalone' && agentForm.delegation_enabled
   }
 
   if (!editingAgentId.value) {
     payload.slug = agentForm.slug.trim() || undefined
     payload.backend_id = agentForm.backend_id
+    payload.config_json = { context: runtimeConfigFormRef.value?.validateAndFilterConfig?.() || draftAgentConfig.value }
   }
 
   return payload
@@ -406,7 +477,7 @@ defineExpose({
   <a-modal
     v-model:open="showAgentModal"
     class="agent-edit-modal"
-    :width="editingAgentId ? 820 : 740"
+    :width="820"
     :footer="null"
     :closable="false"
     @cancel="closeAgentModal"
@@ -522,6 +593,7 @@ defineExpose({
                     class="agent-backend-select"
                     :bordered="false"
                     :options="backendOptions"
+                    @change="loadDraftConfig"
                   />
                   <span v-else class="agent-backend-name">{{ selectedBackendLabel }}</span>
                 </div>
@@ -538,6 +610,23 @@ defineExpose({
                 placeholder="可选"
               />
             </label>
+            <label class="form-label full-width">
+              <span>运行角色</span>
+              <a-radio-group v-model:value="agentForm.execution_role" class="agent-role-group" :disabled="isEditingBuiltinAgent">
+                <a-radio value="standalone">独立 Agent</a-radio>
+                <a-radio value="subagent">子智能体</a-radio>
+              </a-radio-group>
+              <span class="form-hint">子智能体仅由已授权的协调 Agent 调用，不出现在新建对话入口。</span>
+            </label>
+            <div v-if="!isSubagent" class="delegation-setting">
+              <div>
+                <span class="setting-title">任务编排</span>
+                <span class="form-hint">在编排画布添加节点后自动启用；连线定义子智能体的执行顺序。</span>
+              </div>
+              <a-button size="small" @click="agentModalActiveTab = 'workflow'">
+                {{ workflowConfig.subagent_workflow?.nodes?.length ? '编辑编排' : '开始编排' }}
+              </a-button>
+            </div>
           </div>
 
           <div v-if="canEditAgentShareConfig" class="share-config-block">
@@ -547,22 +636,51 @@ defineExpose({
             <ShareConfigForm
               ref="agentShareConfigFormRef"
               v-model="agentShareConfig"
-              :auto-select-user-dept="true"
+              :auto-select-current-user="true"
               :allowed-access-levels="getAgentShareAllowedLevels()"
             />
           </div>
         </section>
 
         <section
-          v-if="editingAgentId"
           v-show="isRuntimeAgentModalTab(agentModalActiveTab)"
           class="agent-modal-section runtime-section"
         >
           <AgentRuntimeConfigForm
+            v-if="editingAgentId && agentModalActiveTab !== 'workflow'"
             ref="runtimeConfigFormRef"
             :segment="runtimeConfigSegment"
             :show-segmented="false"
+            :allow-subagents="agentForm.execution_role === 'standalone' && agentForm.delegation_enabled"
           />
+          <AgentCreationConfig
+            v-else-if="!editingAgentId && agentModalActiveTab !== 'workflow'"
+            ref="runtimeConfigFormRef"
+            v-model="draftAgentConfig"
+            :configurable-items="draftConfigItems"
+            :loading="draftConfigLoading"
+            :allow-subagents="agentForm.execution_role === 'standalone' && agentForm.delegation_enabled"
+          />
+          <template v-else>
+            <a-alert
+              v-if="isSubagent"
+              type="info"
+              show-icon
+              message="子智能体不能继续委派任务"
+              description="请将该智能体设为“独立 Agent”，再使用可视化编排。"
+            />
+            <AgentWorkflowCanvas
+              v-else
+              :disabled="Boolean(editingAgentId)"
+              :model-value="workflowConfig.subagent_workflow || { nodes: [], edges: [] }"
+              :subagents="workflowSubagents"
+              @update:model-value="updateWorkflow"
+              @update:subagents="updateWorkflowSubagents"
+            />
+            <a-alert v-if="editingAgentId" class="workflow-preview-hint" type="info" show-icon message="这是编排拓扑预览" description="请到“智能体管理 → 智能体编排”进行拖拽、连线和节点任务编辑。">
+              <template #action><a-button type="link" size="small" @click="openWorkflowTab">打开编排</a-button></template>
+            </a-alert>
+          </template>
         </section>
       </div>
     </div>
@@ -604,6 +722,42 @@ defineExpose({
       border-color: var(--main-800);
       background: var(--main-800);
     }
+  }
+}
+
+.agent-role-group {
+  display: flex;
+  gap: 20px;
+  padding-top: 8px;
+}
+
+.form-hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--gray-600);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.delegation-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px;
+  border: 1px solid var(--gray-150);
+  border-radius: 8px;
+  background: var(--gray-50);
+
+  .setting-title {
+    display: block;
+    color: var(--gray-800);
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .form-hint {
+    margin-top: 3px;
   }
 }
 

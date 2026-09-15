@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { taskerApi } from '@/apis/tasker'
 import { useUserStore } from '@/stores/user'
@@ -213,6 +213,13 @@ export const useTaskerStore = defineStore('tasker', () => {
     isDrawerOpen.value = false
     summary.value = createDefaultSummary()
   }
+
+  watch(
+    () => userStore.uid,
+    (uid, previousUid) => {
+      if (uid !== previousUid) reset()
+    }
+  )
 
   return {
     isDrawerOpen,

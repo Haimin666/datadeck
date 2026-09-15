@@ -199,7 +199,7 @@ test('knowledge capability 关闭时 Agent 提及资源不请求知识库', asyn
       if (url === '/api/system/discovery') {
         return jsonResponse({ capabilities: { features: { knowledge: false } } })
       }
-      if (url === '/api/system/mcp-servers' || url === '/api/skills/accessible') {
+      if (url === '/api/skills/accessible') {
         return jsonResponse({ data: [] })
       }
       return jsonResponse({})
@@ -214,7 +214,7 @@ test('knowledge capability 关闭时 Agent 提及资源不请求知识库', asyn
 
     assert.equal(requests.some((url) => url.startsWith('/api/knowledge')), false)
     assert.deepEqual(agentStore.availableKnowledgeBases, [])
-    assert.equal(requests.includes('/api/system/mcp-servers'), true)
+    assert.equal(requests.includes('/api/system/mcp-servers'), false)
     assert.equal(requests.includes('/api/skills/accessible'), true)
   })
 })

@@ -4,12 +4,12 @@ from __future__ import annotations
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import text as sa_text
+from sqlalchemy import func, select, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.db import get_db
 from server.deps import get_required_user
-from server.models import User
+from server.models import KnowledgeChunk, User
 from server.utils.datetime_utils import utc_now_naive
 
 dashboard = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -153,17 +153,25 @@ async def get_thread_stats(
 @dashboard.get("/stats/knowledge")
 async def get_knowledge_stats(
     current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """知识库统计（datadeck RAG 口径：文档/分块/组件健康）。"""
     _require_admin(current_user)
-    from datadeck.agents.toolkits import rag_store
     from datadeck.agents.toolkits.cache import stats as cache_stats
+    from datadeck.agents.toolkits import rag_store
 
     health = rag_store.test_connection()
+    indexed_documents = await db.scalar(
+        select(func.count(func.distinct(KnowledgeChunk.document_id)))
+    )
+    indexed_chunks = await db.scalar(select(func.count(KnowledgeChunk.id)))
     return {
-        "documents_indexed": len({v.get("doc_id") for v in rag_store._chunk_store.values()}),
-        "chunks": health.get("checks", {}).get("bm25", {}).get("chunks", 0),
-        "components": health.get("checks", {}),
+        "documents_indexed": int(indexed_documents or 0),
+        "chunks": int(indexed_chunks or 0),
+        "components": {
+            **health.get("checks", {}),
+            "keyword_index": {"ok": True, "source": "postgresql"},
+        },
         "caches": cache_stats(),
     }
 
@@ -213,11 +221,14 @@ async def get_conversations(
     _require_admin(current_user)
     conds, params = ["1=1"], {"limit": limit, "offset": offset}
     if uid:
-        conds.append("t.uid = :uid"); params["uid"] = uid
+        conds.append("t.uid = :uid")
+        params["uid"] = uid
     if agent_id:
-        conds.append("t.agent_id = :aid"); params["aid"] = agent_id
+        conds.append("t.agent_id = :aid")
+        params["aid"] = agent_id
     if search:
-        conds.append("t.title ILIKE :q"); params["q"] = f"%{search}%"
+        conds.append("t.title ILIKE :q")
+        params["q"] = f"%{search}%"
     where = " AND ".join(conds)
     rows = await db.execute(sa_text(f"""
         SELECT t.id, t.uid, t.agent_id, t.title, t.is_pinned, t.created_at, t.updated_at,
@@ -289,7 +300,7 @@ async def get_dashboard_users(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """用户列表（保留旧入口）。"""
+    """管理员用户列表。"""
     _require_admin(current_user)
     r = await db.execute(sa_text(
         "SELECT id, username, uid, role, avatar, domain, last_login, is_deleted "

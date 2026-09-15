@@ -19,6 +19,7 @@ export function useAgentRequestQueue({
     const entry = ts?.requestStreams?.[requestId]
     if (!entry) return
     entry.controller?.abort()
+    if (entry.retryTimer) clearTimeout(entry.retryTimer)
     delete ts.requestStreams[requestId]
   }
 
@@ -70,7 +71,7 @@ export function useAgentRequestQueue({
     if (ts.requestStreams[requestId]) return
 
     const controller = new AbortController()
-    const entry = { controller, position: 0, status: 'queued' }
+    const entry = { controller, position: 0, status: 'queued', retryTimer: null, retries: 0 }
     ts.requestStreams[requestId] = entry
 
     try {
@@ -86,8 +87,8 @@ export function useAgentRequestQueue({
         const tsInner = getThreadState(threadId)
         const innerEntry = tsInner?.requestStreams?.[requestId]
         if (!tsInner || innerEntry?.controller !== controller) return
-        // 后端队列 SSE 使用 { event, payload } 包装；兼容旧的扁平事件格式。
-        const eventPayload = data?.payload || data || {}
+        // 所有队列 SSE 事件统一使用 { event, payload } 信封。
+        const eventPayload = data?.payload || {}
 
         if (event === 'queued' && data) {
           entry.position = eventPayload.position || entry.position
@@ -125,7 +126,18 @@ export function useAgentRequestQueue({
     } catch (error) {
       if (error?.name !== 'AbortError') {
         console.error('Request SSE stream error:', error)
-        handleChatError(error, 'stream')
+        // 队列事件流断开时，请求通常仍停留在服务端队列；重新同步后再恢复监听。
+        const current = getThreadState(threadId)?.requestStreams?.[requestId]
+        if (current?.controller === controller) {
+          delete current.controller
+          current.retries = (current.retries || 0) + 1
+          current.retryTimer = setTimeout(() => {
+            const latest = getThreadState(threadId)
+            if (!latest?.requestStreams?.[requestId]) return
+            delete latest.requestStreams[requestId]
+            void startRequestStream(threadId, requestId)
+          }, Math.min(1000 * 2 ** Math.min(current.retries - 1, 4), 10000))
+        }
       }
     } finally {
       const tsFinal = getThreadState(threadId)

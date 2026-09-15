@@ -260,11 +260,9 @@ import { useInfoStore } from '@/stores/info'
 import { useAgentStore } from '@/stores/agent'
 import { message } from 'ant-design-vue'
 import { healthApi } from '@/apis/system_api'
-import { authApi } from '@/apis/auth_api'
 import {
   User as UserIcon,
   Lock as LockIcon,
-  Key as KeyIcon,
   AlertCircle as ExclamationCircleIcon
 } from '@lucide/vue'
 import { sanitizeRedirect } from '@/utils/redirect'

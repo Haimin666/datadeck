@@ -7,12 +7,72 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.db import get_db
-from server.models import User, ApiKey
+from server.models import User, ApiKey, Role
 from server.utils.auth import decode_access_token, derive_api_key_hash
-from server.config import settings
 from server.utils.datetime_utils import utc_now_naive
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token", auto_error=False)
+
+MODULE_PERMISSIONS = frozenset({
+    "conversations", "agents", "workspace", "knowledge", "extensions", "scheduled_tasks", "metrics",
+    "settings", "users",
+})
+BUILTIN_ROLE_PERMISSIONS = {
+    "superadmin": sorted(MODULE_PERMISSIONS),
+    "admin": ["conversations", "agents", "workspace", "knowledge", "extensions", "scheduled_tasks", "metrics", "settings", "users"],
+    "user": ["conversations", "workspace"],
+}
+
+def normalize_module_permissions(permissions: list[str] | None) -> list[str]:
+    return sorted({str(item).strip() for item in permissions or [] if str(item).strip()})
+
+
+async def get_role_permissions(db: AsyncSession, role_slug: str) -> list[str]:
+    """Resolve current permissions from the database with built-in role defaults."""
+    if role_slug == "superadmin":
+        return BUILTIN_ROLE_PERMISSIONS["superadmin"]
+    role = await db.get(Role, role_slug)
+    if role is not None:
+        return [item for item in normalize_module_permissions(role.permissions) if item in MODULE_PERMISSIONS]
+    return BUILTIN_ROLE_PERMISSIONS.get(role_slug, BUILTIN_ROLE_PERMISSIONS["user"])
+
+
+async def get_role_agent_slugs(db: AsyncSession, role_slug: str) -> set[str] | None:
+    """Return the role's Agent allow-list.
+
+    Built-in roles keep their platform-wide Agent access. A custom role is
+    explicit: an empty assignment means it currently has no Agent access.
+    """
+    if role_slug == "superadmin":
+        return None
+    role = await db.get(Role, role_slug)
+    if role is None:
+        return None
+    if role.is_builtin:
+        return None
+    return {str(slug).strip() for slug in role.agent_slugs if str(slug).strip()}
+
+
+async def require_agent_access(db: AsyncSession, user: User, agent_slug: str) -> None:
+    """Enforce role-level Agent assignment for runtime calls."""
+    allowed = await get_role_agent_slugs(db, user.role)
+    if allowed is not None and agent_slug not in allowed:
+        raise HTTPException(status_code=403, detail="当前角色未分配该智能体")
+
+
+def require_module_access(module: str):
+    if module not in MODULE_PERMISSIONS:
+        raise ValueError(f"Unknown module permission: {module}")
+
+    async def dependency(
+        user: User = Depends(get_required_user),
+        db: AsyncSession = Depends(get_db),
+    ) -> User:
+        if module not in await get_role_permissions(db, user.role):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="没有访问该模块的权限")
+        return user
+
+    return dependency
 
 
 async def get_required_user(

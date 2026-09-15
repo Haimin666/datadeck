@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.db import get_db
-from server.deps import get_admin_user
+from server.deps import require_module_access, require_agent_access
 from server.models import Agent, Project, ScheduledTask, User
 from server.utils.cron import validate_cron_expression
 
@@ -38,10 +38,11 @@ async def _get(db: AsyncSession, uid: str, task_id: str) -> ScheduledTask:
     return item
 
 
-async def _require_agent(db: AsyncSession, agent_slug: str) -> None:
-    item = (await db.execute(select(Agent.id).where(Agent.slug == agent_slug))).scalar_one_or_none()
+async def _require_agent(db: AsyncSession, user: User, agent_slug: str) -> None:
+    item = (await db.execute(select(Agent).where(Agent.slug == agent_slug))).scalar_one_or_none()
     if item is None:
         raise HTTPException(status_code=422, detail="指定的智能体不存在")
+    await require_agent_access(db, user, item.slug)
 
 
 async def _require_project(db: AsyncSession, uid: str, project_id: str | None) -> None:
@@ -52,18 +53,18 @@ async def _require_project(db: AsyncSession, uid: str, project_id: str | None) -
 
 
 @scheduled_tasks.get("")
-async def list_scheduled_tasks(current_user: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)):
+async def list_scheduled_tasks(current_user: User = Depends(require_module_access("scheduled_tasks")), db: AsyncSession = Depends(get_db)):
     items = (await db.execute(select(ScheduledTask).where(ScheduledTask.uid == current_user.uid).order_by(ScheduledTask.updated_at.desc()))).scalars().all()
     return {"tasks": [item.to_dict() for item in items]}
 
 
 @scheduled_tasks.post("")
-async def create_scheduled_task(payload: ScheduledTaskIn, current_user: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)):
+async def create_scheduled_task(payload: ScheduledTaskIn, current_user: User = Depends(require_module_access("scheduled_tasks")), db: AsyncSession = Depends(get_db)):
     try:
         payload.cron = _validate_cron(payload.cron.strip())
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    await _require_agent(db, payload.agent_slug)
+    await _require_agent(db, current_user, payload.agent_slug)
     await _require_project(db, current_user.uid, payload.project_id)
     item = ScheduledTask(id=str(uuid.uuid4()), uid=current_user.uid, **payload.model_dump())
     db.add(item)
@@ -72,13 +73,13 @@ async def create_scheduled_task(payload: ScheduledTaskIn, current_user: User = D
 
 
 @scheduled_tasks.put("/{task_id}")
-async def update_scheduled_task(task_id: str, payload: ScheduledTaskIn, current_user: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)):
+async def update_scheduled_task(task_id: str, payload: ScheduledTaskIn, current_user: User = Depends(require_module_access("scheduled_tasks")), db: AsyncSession = Depends(get_db)):
     try:
         payload.cron = _validate_cron(payload.cron.strip())
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     item = await _get(db, current_user.uid, task_id)
-    await _require_agent(db, payload.agent_slug)
+    await _require_agent(db, current_user, payload.agent_slug)
     await _require_project(db, current_user.uid, payload.project_id)
     for key, value in payload.model_dump().items():
         setattr(item, key, value)
@@ -87,7 +88,7 @@ async def update_scheduled_task(task_id: str, payload: ScheduledTaskIn, current_
 
 
 @scheduled_tasks.delete("/{task_id}")
-async def delete_scheduled_task(task_id: str, current_user: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)):
+async def delete_scheduled_task(task_id: str, current_user: User = Depends(require_module_access("scheduled_tasks")), db: AsyncSession = Depends(get_db)):
     item = await _get(db, current_user.uid, task_id)
     await db.delete(item)
     return {"ok": True}

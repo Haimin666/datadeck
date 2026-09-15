@@ -16,6 +16,22 @@ async function getUserAccessOptions() {
   return apiAdminGet('/api/auth/users/access-options')
 }
 
+async function getRoles() {
+  return apiSuperAdminGet('/api/auth/roles')
+}
+
+async function createRole(role) {
+  return apiSuperAdminPost('/api/auth/roles', role)
+}
+
+async function updateRole(slug, role) {
+  return apiPut(`/api/auth/roles/${encodeURIComponent(slug)}`, role)
+}
+
+async function deleteRole(slug) {
+  return apiDelete(`/api/auth/roles/${encodeURIComponent(slug)}`)
+}
+
 async function login(credentials) {
   const formData = new FormData()
   formData.append('username', credentials.loginId)
@@ -108,6 +124,10 @@ export const authApi = {
   checkUid,
   impersonateUser,
   getUserAccessOptions,
+  getRoles,
+  createRole,
+  updateRole,
+  deleteRole,
   getCLIAuthSession,
   approveCLIAuthSession
 }

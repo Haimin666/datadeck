@@ -46,6 +46,7 @@ class ModelProviderPayload(BaseModel):
     provider_type: str | None = Field(None, description="供应商适配类型，默认 openai")
     default_protocol: str | None = Field(None, description="默认协议")
     base_url: str | None = Field(None, description="API 基础 URL")
+    proxy_url: str | None = Field(None, description="该供应商模型请求使用的 HTTP/HTTPS 代理")
     embedding_base_url: str | None = Field(None, description="Embedding 模型请求基础 URL")
     rerank_base_url: str | None = Field(None, description="Rerank 模型请求基础 URL")
     models_endpoint: str | None = Field(None, description="聊天/通用模型列表端点")
@@ -131,6 +132,7 @@ async def update_provider(
         for nullable_field in (
             "api_key_env",
             "api_key",
+            "proxy_url",
             "default_protocol",
             "embedding_base_url",
             "rerank_base_url",

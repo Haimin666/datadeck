@@ -56,8 +56,8 @@ const filteredAgents = computed(() => {
 })
 
 const groupedAgents = computed(() => {
-  const agents = filteredAgents.value.filter((agent) => !agent.is_subagent)
-  const subagents = filteredAgents.value.filter((agent) => agent.is_subagent)
+  const agents = filteredAgents.value.filter((agent) => agent.execution_role !== 'subagent')
+  const subagents = filteredAgents.value.filter((agent) => agent.execution_role === 'subagent')
   return [
     { key: 'agents', title: '智能体', agents },
     { key: 'subagents', title: '子智能体', agents: subagents }
@@ -117,7 +117,7 @@ const openEditAgentModal = (agent) => {
 }
 
 const openAgentChat = (agent) => {
-  if (!agent?.id || agent.is_subagent) return
+  if (!agent?.id || agent.execution_role === 'subagent') return
   router.push({ name: 'AgentComp', query: { agent_id: agent.id } })
 }
 

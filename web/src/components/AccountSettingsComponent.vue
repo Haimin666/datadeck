@@ -451,9 +451,6 @@ watch(() => [userStore.username, userStore.phoneNumber], syncProfileDraft, { imm
     font-family: 'Monaco', 'Consolas', monospace;
   }
 
-  .apikey-card {
-    padding: 16px;
-  }
 }
 
 :deep(.spin) {

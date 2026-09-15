@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import AgentManagePanel from '@/components/model-management/AgentManagePanel.vue'
 import ModelProviderManagePanel from '@/components/model-management/ModelProviderManagePanel.vue'
+import AgentOrchestrationPanel from '@/components/model-management/AgentOrchestrationPanel.vue'
 import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
@@ -14,22 +15,27 @@ const userStore = useUserStore()
 const activeTab = ref('agents')
 const agentPanelRef = ref(null)
 const providerPanelRef = ref(null)
+const orchestrationPanelRef = ref(null)
 
 const modelManageTabs = computed(() => {
   const tabs = [{ key: 'agents', label: '智能体' }]
+  if (userStore.isAdmin) tabs.push({ key: 'orchestration', label: '智能体编排' })
   if (userStore.isAdmin) tabs.push({ key: 'providers', label: '模型供应商' })
   return tabs
 })
 
-const activePanel = computed(() =>
-  activeTab.value === 'providers' ? providerPanelRef.value : agentPanelRef.value
-)
+const activePanel = computed(() => {
+  if (activeTab.value === 'providers') return providerPanelRef.value
+  if (activeTab.value === 'orchestration') return orchestrationPanelRef.value
+  return agentPanelRef.value
+})
 
 const activeLoading = computed(() => activePanel.value?.loading || false)
 const activeStats = computed(() => activePanel.value?.stats || {})
 
 const normalizeTab = (tab) => {
   if (tab === 'providers' && userStore.isAdmin) return 'providers'
+  if (tab === 'orchestration' && userStore.isAdmin) return 'orchestration'
   return 'agents'
 }
 
@@ -70,13 +76,18 @@ watch(activeTab, (tab) => {
           <span v-if="activeStats.builtin">{{ activeStats.builtin }} 个内置</span>
           <span>{{ activeStats.manageable || 0 }} 个可管理</span>
         </div>
-        <div v-else class="summary-strip">
+        <div v-else-if="activeTab === 'providers'" class="summary-strip">
           <span>{{ activeStats.total || 0 }} 个供应商</span>
           <span>{{ activeStats.enabled || 0 }} 个启用</span>
           <span v-if="activeStats.warning > 0" class="warning-count">
             {{ activeStats.warning }} 个凭证缺失
           </span>
           <span>{{ activeStats.models || 0 }} 个模型</span>
+        </div>
+        <div v-else class="summary-strip">
+          <span>{{ activeStats.total || 0 }} 个协调 Agent</span>
+          <span>{{ activeStats.configured || 0 }} 个已启用编排</span>
+          <span>{{ activeStats.nodes || 0 }} 个当前节点</span>
         </div>
       </template>
     </PageHeader>
@@ -87,6 +98,9 @@ watch(activeTab, (tab) => {
       </div>
       <div v-if="userStore.isAdmin && activeTab === 'providers'" class="tab-panel">
         <ModelProviderManagePanel ref="providerPanelRef" />
+      </div>
+      <div v-if="userStore.isAdmin && activeTab === 'orchestration'" class="tab-panel">
+        <AgentOrchestrationPanel ref="orchestrationPanelRef" />
       </div>
     </div>
   </div>

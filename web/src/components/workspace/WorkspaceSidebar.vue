@@ -79,56 +79,30 @@
         <FileTypeIcon is-dir :size="16" />
         <span>保存的产物</span>
       </button>
-    </section>
-
-    <section v-if="knowledgeEnabled && myDatabases.length" class="sidebar-section">
-      <div class="section-title">我的知识库</div>
       <button
-        v-for="database in myDatabases"
-        :key="database.kb_id || database.id || database.name"
         type="button"
         class="workspace-nav-item secondary"
-        :class="{ active: activeKey === `database:${database.kb_id}` }"
-        @click="$emit('select-database', database)"
+        :class="{ active: activeKey === 'personal' && isSameOrChildPath(currentPath, publicMaterialsPath) }"
+        @click="$emit('select-path', publicMaterialsPath)"
       >
         <FileTypeIcon is-dir :size="16" />
-        <span>{{ database.name }}</span>
+        <span>公共知识物料</span>
       </button>
     </section>
 
-    <section v-if="knowledgeEnabled && sharedDatabases.length" class="sidebar-section">
-      <div class="section-title">共享知识库</div>
-      <button
-        v-for="database in sharedDatabases"
-        :key="database.kb_id || database.id || database.name"
-        type="button"
-        class="workspace-nav-item secondary"
-        :class="{ active: activeKey === `database:${database.kb_id}` }"
-        @click="$emit('select-database', database)"
-      >
-        <FileTypeIcon is-dir :size="16" />
-        <span>{{ database.name }}</span>
-      </button>
-    </section>
-
-    <section v-if="knowledgeEnabled && loadingDatabases" class="sidebar-section">
-      <div class="sidebar-muted">正在加载知识库...</div>
-    </section>
-    <section v-else-if="knowledgeEnabled && !databases.length" class="sidebar-section">
-      <div class="sidebar-muted">暂无可访问知识库</div>
-    </section>
   </aside>
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 import { ChevronDown, FolderPlus, Loader2, Upload } from '@lucide/vue'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import { useOutsidePointerdown } from '@/composables/useOutsidePointerdown'
 
 const savedArtifactsPath = '/saved_artifacts'
 const agentsPath = '/agents/'
-const quickAccessPaths = [savedArtifactsPath, agentsPath]
+const publicMaterialsPath = '/public/knowledge-materials'
+const quickAccessPaths = [savedArtifactsPath, agentsPath, publicMaterialsPath]
 
 const normalizePath = (path) => String(path || '/').replace(/\/$/, '') || '/'
 const isSameOrChildPath = (path, targetPath) => {
@@ -143,17 +117,12 @@ const isQuickAccessPath = (path) =>
 const props = defineProps({
   activeKey: { type: String, default: 'personal' },
   currentPath: { type: String, default: '/' },
-  databases: { type: Array, default: () => [] },
-  loadingDatabases: { type: Boolean, default: false },
-  knowledgeEnabled: { type: Boolean, default: false },
-  currentUid: { type: String, default: '' },
   disabled: { type: Boolean, default: false },
   uploading: { type: Boolean, default: false }
 })
 
 const emit = defineEmits([
   'select-personal',
-  'select-database',
   'select-path',
   'upload-file',
   'create-directory'
@@ -179,13 +148,6 @@ const onCreateFolderAction = () => {
 
 useOutsidePointerdown(uploadActionMenuOpen, [uploadActionMenuRef])
 
-const myDatabases = computed(() =>
-  props.databases.filter((db) => db.created_by === props.currentUid)
-)
-
-const sharedDatabases = computed(() =>
-  props.databases.filter((db) => db.created_by !== props.currentUid)
-)
 </script>
 
 <style scoped lang="less">

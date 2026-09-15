@@ -10,15 +10,11 @@
               type="button"
               class="file-browser-breadcrumb-item"
               :class="{
-                active: isCurrentBreadcrumb(index),
-                'is-drop-target': breadcrumbDropIndex === index
+                active: isCurrentBreadcrumb(index)
               }"
               :disabled="isBreadcrumbDisabled(item, index)"
               :title="item.title || item.path || item.name"
               @click="handleBreadcrumbClick(item, index)"
-              @dragover="handleBreadcrumbDragOver($event, item, index)"
-              @dragleave="handleBreadcrumbDragLeave($event, index)"
-              @drop="handleBreadcrumbDrop($event, item, index)"
             >
               <span class="file-browser-breadcrumb-label">{{ item.name || rootLabel }}</span>
             </button>
@@ -104,10 +100,9 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { ListRestart } from '@lucide/vue'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
-import { canDropOnFileBreadcrumb } from '@/utils/knowledgeFileMutations'
 
 const props = defineProps({
   rows: { type: Array, default: () => [] },
@@ -124,8 +119,7 @@ const props = defineProps({
   emptyText: { type: String, default: '暂无文件' },
   rootLabel: { type: String, default: '文件' },
   refreshable: { type: Boolean, default: false },
-  refreshing: { type: Boolean, default: false },
-  breadcrumbDroppable: { type: Boolean, default: false }
+  refreshing: { type: Boolean, default: false }
 })
 
 const emit = defineEmits([
@@ -134,11 +128,8 @@ const emit = defineEmits([
   'update:selectedKeys',
   'page-change',
   'table-change',
-  'refresh',
-  'breadcrumb-drop'
+  'refresh'
 ])
-
-const breadcrumbDropIndex = ref(null)
 
 const resolvedBreadcrumbs = computed(() => {
   if (props.breadcrumbs.length) return props.breadcrumbs
@@ -205,33 +196,6 @@ const isBreadcrumbDisabled = (item, index) => Boolean(item.disabled || isCurrent
 const handleBreadcrumbClick = (item, index) => {
   if (isBreadcrumbDisabled(item, index)) return
   emit('breadcrumb-click', { item, index })
-}
-
-const canDropOnBreadcrumb = (item, index) =>
-  canDropOnFileBreadcrumb({
-    enabled: props.breadcrumbDroppable,
-    item,
-    index,
-    count: resolvedBreadcrumbs.value.length
-  })
-
-const handleBreadcrumbDragOver = (event, item, index) => {
-  if (!canDropOnBreadcrumb(item, index)) return
-  event.preventDefault()
-  event.dataTransfer.dropEffect = 'move'
-  breadcrumbDropIndex.value = index
-}
-
-const handleBreadcrumbDragLeave = (event, index) => {
-  if (event.currentTarget.contains(event.relatedTarget)) return
-  if (breadcrumbDropIndex.value === index) breadcrumbDropIndex.value = null
-}
-
-const handleBreadcrumbDrop = (event, item, index) => {
-  if (!canDropOnBreadcrumb(item, index)) return
-  event.preventDefault()
-  breadcrumbDropIndex.value = null
-  emit('breadcrumb-drop', { item, index })
 }
 
 const resolveRowClassName = (row, index) => {

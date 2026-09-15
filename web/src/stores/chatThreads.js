@@ -1,8 +1,9 @@
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { threadApi } from '@/apis'
 import { handleChatError } from '@/utils/errorHandler'
 import { createThreadDraftStore } from '@/utils/thread_draft'
+import { useUserStore } from '@/stores/user'
 
 const PAGE_SIZE = 100
 const threadDraftStore = createThreadDraftStore()
@@ -21,6 +22,26 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
   const threadCreationInFlight = ref(false)
   const hasMoreThreads = ref(true)
   const isLoadingMoreThreads = ref(false)
+  const userStore = useUserStore()
+  let listRequestVersion = 0
+  let listMutationVersion = 0
+
+  const reset = () => {
+    listRequestVersion += 1
+    listMutationVersion += 1
+    threads.value = []
+    currentThreadId.value = null
+    threadCreationInFlight.value = false
+    hasMoreThreads.value = true
+    isLoadingMoreThreads.value = false
+  }
+
+  watch(
+    () => userStore.uid,
+    (uid, previousUid) => {
+      if (uid !== previousUid) reset()
+    }
+  )
 
   const currentThread = computed(() => {
     if (!currentThreadId.value) return null
@@ -39,6 +60,7 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
 
   const upsertThread = (thread) => {
     if (!thread?.id) return
+    listMutationVersion += 1
     const index = threads.value.findIndex((item) => item.id === thread.id)
     if (index >= 0) {
       threads.value[index] = { ...threads.value[index], ...thread }
@@ -83,16 +105,20 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
   }
 
   const loadThreads = async (agentId = null) => {
+    const requestVersion = ++listRequestVersion
+    const mutationVersion = listMutationVersion
+    const requestUid = userStore.uid
     try {
       const fetchedThreads = await threadApi.getThreads(agentId, PAGE_SIZE, 0)
+      if (
+        requestVersion !== listRequestVersion ||
+        mutationVersion !== listMutationVersion ||
+        requestUid !== userStore.uid
+      ) {
+        return threads.value
+      }
       threads.value = fetchedThreads || []
       hasMoreThreads.value = Boolean(fetchedThreads && countNonPinnedThreads(fetchedThreads) >= PAGE_SIZE)
-      if (
-        currentThreadId.value &&
-        !threads.value.find((thread) => thread.id === currentThreadId.value)
-      ) {
-        setCurrentThreadId(null)
-      }
       return threads.value
     } catch (error) {
       console.error('Failed to fetch threads:', error)
@@ -131,6 +157,7 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     try {
       const thread = await threadApi.createThread(agentId, title, metadata, options)
       if (thread) {
+        listMutationVersion += 1
         threads.value = [thread, ...threads.value.filter((item) => item.id !== thread.id)]
       }
       return thread
@@ -146,6 +173,7 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
 
     try {
       await threadApi.deleteThread(threadId)
+      listMutationVersion += 1
       threads.value = threads.value.filter((thread) => thread.id !== threadId)
       // 线程已删除，同步清理其输入草稿
       threadDraftStore.remove(threadId)
@@ -172,6 +200,7 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     }
     if (!removedIds.length) return []
 
+    listMutationVersion += 1
     threads.value = remainingThreads
     removedIds.forEach((threadId) => threadDraftStore.remove(threadId))
     if (removedIds.includes(currentThreadId.value)) {
@@ -203,6 +232,15 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     }
   }
 
+  const loadThread = async (threadId) => {
+    if (!threadId) return null
+    const existing = threads.value.find((thread) => thread.id === threadId)
+    if (existing) return existing
+    const thread = await threadApi.getThread(threadId)
+    upsertThread(thread)
+    return thread
+  }
+
   return {
     threads,
     currentThreadId,
@@ -217,10 +255,12 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     markThreadViewed,
     syncThreadStatuses,
     loadThreads,
+    loadThread,
     loadMoreThreads,
     createThread,
     deleteThread,
     removeThreadsByProject,
-    updateThread
+    updateThread,
+    reset
   }
 })

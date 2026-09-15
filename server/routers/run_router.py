@@ -5,12 +5,12 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.db import get_db
-from server.deps import get_required_user
+from server.deps import get_required_user, require_agent_access
 from server.event_translator import parse_after_seq, poll_run_events
 from server.models import Agent, User, AgentRun, Thread
 from server.services.run_service import (
@@ -26,7 +26,7 @@ class RunCreateRequest(BaseModel):
     query: str | None = None
     agent_slug: str
     thread_id: str
-    meta: dict = {}
+    meta: dict = Field(default_factory=dict)
     image_content: str | None = None
     model_spec: str | None = None
     tool_approval_mode: str | None = None
@@ -58,6 +58,31 @@ async def create_run(
     )
     if target_agent is None or thread.agent_id not in {target_agent.id, target_agent.slug}:
         raise HTTPException(status_code=404, detail="智能体不存在或与对话不匹配")
+    await require_agent_access(db, current_user, target_agent.slug)
+
+    if body.resume:
+        resume_run = await db.scalar(
+            sa_select(AgentRun).where(
+                AgentRun.id == body.resume,
+                AgentRun.uid == current_user.uid,
+            )
+        )
+        if resume_run is None:
+            raise HTTPException(status_code=404, detail="待恢复的 Run 不存在")
+        if resume_run.thread_id != body.thread_id or resume_run.agent_slug != target_agent.slug:
+            raise HTTPException(status_code=409, detail="待恢复的 Run 与当前对话或智能体不匹配")
+        if resume_run.status != "interrupted":
+            raise HTTPException(status_code=409, detail="只有等待用户处理的 Run 才可以恢复")
+        if body.tool_approval is None and body.resume_payload is None:
+            raise HTTPException(status_code=422, detail="恢复 Run 必须提供审批决定或用户回答")
+        if body.tool_approval is not None:
+            decisions = body.tool_approval.get("decisions")
+            approved = body.tool_approval.get("approved")
+            if decisions is not None:
+                if not isinstance(decisions, list) or not decisions:
+                    raise HTTPException(status_code=422, detail="审批 decisions 不能为空")
+            elif not isinstance(approved, bool):
+                raise HTTPException(status_code=422, detail="审批结果必须包含 approved 布尔值或 decisions 列表")
 
     if body.tool_approval_mode is not None:
         if body.tool_approval_mode not in {"default", "always_trust", "none"}:
@@ -117,15 +142,12 @@ async def create_run(
     if not queued:
         await dispatch_run(run.id, resume_command=resume_command)
     payload = run.to_dict()
-    # 前端 AgentChatComponent 读取顶层 run_id/status/queue_policy（扁平契约），
-    # 同时保留 run 键兼容既有调用（如 SSE 契约测试读 json()["run"]）。
     return {
         **payload,
         "run_id": run.id,
         "status": "queued" if queued else run.status,
         "queue_policy": body.queue_policy,
         "queue_position": active_count + 1 if queued else 1,
-        "run": payload,
     }
 
 
@@ -135,7 +157,7 @@ async def get_run(run_id: str, current_user: User = Depends(get_required_user), 
     run = r.scalar_one_or_none()
     if not run:
         raise HTTPException(status_code=404, detail="Run 不存在")
-    return {"run": run.to_dict()}
+    return run.to_dict()
 
 
 @run_router.post("/{run_id}/cancel")

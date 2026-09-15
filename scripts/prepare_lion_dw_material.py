@@ -8,6 +8,13 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import sqlglot
+    from sqlglot import exp
+except ImportError:  # 允许仅做文件清单扫描的最小环境运行
+    sqlglot = None
+    exp = None
+
 
 ROOT = Path("../lion_dw/app").resolve()
 OUT = Path("data_material/lion_dw")
@@ -22,6 +29,25 @@ def line_records(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8", errors="replace").splitlines()
 
 
+def ast_metadata(text: str) -> dict:
+    """提取 SQL AST 证据；解析失败只标记状态，不丢失正则扫描结果。"""
+    if sqlglot is None or exp is None:
+        return {"parse_status": "dependency_missing", "ast_tables": [], "ast_columns": [], "ast_features": {}}
+    try:
+        statements = sqlglot.parse(text, read="hive")
+        tables = sorted({item.sql(dialect="hive") for statement in statements for item in statement.find_all(exp.Table)})
+        columns = sorted({item.sql(dialect="hive") for statement in statements for item in statement.find_all(exp.Column)})
+        features = {
+            "joins": sorted({item.sql(dialect="hive") for statement in statements for item in statement.find_all(exp.Join)}),
+            "filters": sorted({item.this.sql(dialect="hive") for statement in statements for item in statement.find_all(exp.Where)}),
+            "aggregations": sorted({item.sql(dialect="hive") for statement in statements for item in statement.find_all(exp.AggFunc)}),
+            "partitions": sorted(set(re.findall(r"\b(?:partition|dt)\s*(?:=|\(|by)?[^\n,)]*", text, re.I))),
+        }
+        return {"parse_status": "ok", "ast_tables": tables, "ast_columns": columns, "ast_features": features}
+    except Exception as exc:  # noqa: BLE001 — 单文件失败不能阻断全量盘点
+        return {"parse_status": "failed", "parse_error": type(exc).__name__, "ast_tables": [], "ast_columns": [], "ast_features": {}}
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -34,6 +60,9 @@ def main() -> None:
         text = "\n".join(lines)
         tables = sorted(set(m.group(1).lower() for m in TABLE_RE.finditer(text)))
         targets = sorted(set(m.group(1).lower() for m in TARGET_RE.finditer(text)))
+        ast = ast_metadata(text) if path.suffix.lower() in {".sql", ".hql"} else {
+            "parse_status": "not_sql", "ast_tables": [], "ast_columns": [], "ast_features": {}
+        }
         fields = []
         for number, line in enumerate(lines, 1):
             match = FIELD_COMMENT_RE.search(line)
@@ -57,6 +86,7 @@ def main() -> None:
             "line_count": len(lines),
             "tables": tables,
             "targets": targets,
+            **ast,
             "partitioned": bool(re.search(r"\bpartition(?:ed)?\b|\bdt\s*=", text, re.I)),
             "run_date_parameter": "{run_date}" in text,
             "table_comment": (TABLE_COMMENT_RE.search(text).group(1) if TABLE_COMMENT_RE.search(text) else ""),

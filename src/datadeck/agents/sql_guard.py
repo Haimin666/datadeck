@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 
 import sqlglot
 from sqlglot import exp
@@ -83,6 +84,80 @@ def _collect_tables(ast) -> tuple[list[str], int]:
             tables.append(text)
     joins = len(list(ast.find_all(exp.Join)))
     return tables, joins
+
+
+def _csv_env(name: str) -> set[str]:
+    return {
+        item.strip().lower()
+        for item in os.getenv(name, "").split(",")
+        if item.strip()
+    }
+
+
+def _table_names(table: exp.Table) -> set[str]:
+    values = {str(table.name or "").strip().lower()}
+    qualified = ".".join(
+        value for value in (table.catalog, table.db, table.name) if value
+    ).strip().lower()
+    if qualified:
+        values.add(qualified)
+    return {value for value in values if value}
+
+
+def _policy_issues(ast) -> list[SqlIssue]:
+    """应用部署侧的 schema/table/column 只读边界。"""
+    allowed_schemas = _csv_env("DATADECK_SQL_ALLOWED_SCHEMAS")
+    denied_tables = _csv_env("DATADECK_SQL_DENIED_TABLES")
+    denied_columns = _csv_env("DATADECK_SQL_DENIED_COLUMNS")
+    if not allowed_schemas and not denied_tables and not denied_columns:
+        return []
+
+    issues: list[SqlIssue] = []
+    aliases: dict[str, str] = {}
+    table_names: list[str] = []
+    for table in ast.find_all(exp.Table):
+        names = _table_names(table)
+        physical_name = ".".join(
+            value for value in (table.catalog, table.db, table.name) if value
+        ).strip().lower()
+        if physical_name:
+            table_names.append(physical_name)
+        if table.alias:
+            aliases[table.alias.lower()] = physical_name or table.name.lower()
+        if denied_tables and names & denied_tables:
+            issues.append(_issue(
+                "SQL_TABLE_DENIED",
+                f"访问表 {table.sql(dialect=DEFAULT_DIALECT)} 不在允许范围内",
+            ))
+        if allowed_schemas:
+            schema = str(table.db or table.catalog or "").strip().lower()
+            if not schema or schema not in allowed_schemas:
+                issues.append(_issue(
+                    "SQL_SCHEMA_NOT_ALLOWED",
+                    f"表 {table.sql(dialect=DEFAULT_DIALECT)} 的 Schema 不在允许范围内",
+                ))
+
+    if denied_columns:
+        if list(ast.find_all(exp.Star)):
+            issues.append(_issue(
+                "SQL_COLUMN_DENIED",
+                "配置了敏感字段禁止清单时不能使用 SELECT *",
+            ))
+        for column in ast.find_all(exp.Column):
+            column_name = str(column.name or "").strip().lower()
+            qualifier = str(column.table or "").strip().lower()
+            physical_qualifier = aliases.get(qualifier, qualifier)
+            candidates = {column_name}
+            if physical_qualifier:
+                candidates.add(f"{physical_qualifier}.{column_name}")
+            elif len(table_names) == 1:
+                candidates.add(f"{table_names[0]}.{column_name}")
+            if candidates & denied_columns:
+                issues.append(_issue(
+                    "SQL_COLUMN_DENIED",
+                    f"字段 {column.sql(dialect=DEFAULT_DIALECT)} 命中敏感字段禁止清单",
+                ))
+    return issues
 
 
 def validate_sql(
@@ -180,6 +255,7 @@ def validate_sql(
                 "SQL_TOO_MANY_JOINS",
                 f"包含 {joins} 个 JOIN（上限 {max_joins}）",
             ))
+        issues.extend(_policy_issues(root))
 
     normalized = None
     if not issues:

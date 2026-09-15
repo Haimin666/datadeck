@@ -34,6 +34,14 @@ export function useAgentThreadState({
         activeRunId: null,
         activeRunSteerable: false,
         runLastSeq: '0-0',
+        runConnectionStatus: 'idle',
+        runReconnectAttempt: 0,
+        runLastError: '',
+        runFailureMessage: '',
+        traceEvents: [],
+        runtimeSnapshot: null,
+        runtimeDiagnostics: [],
+        runReconnectTimer: null,
         lastRetryableJobTry: null,
         replyLoadingVisible: false,
         pendingRequestId: null,
@@ -45,6 +53,7 @@ export function useAgentThreadState({
         queuedRequests: [],
         queueSnapshot: { ...IDLE_QUEUE_SNAPSHOT },
         continueQueueInFlight: false,
+        approvalResumeInFlight: false,
         requestStreams: {}
       }
     }
@@ -76,6 +85,9 @@ export function useAgentThreadState({
 
     if (threadState.runStreamAbortController) {
       threadState.runStreamAbortController.abort()
+    }
+    if (threadState.runReconnectTimer) {
+      clearTimeout(threadState.runReconnectTimer)
     }
     abortAllRequestStreams(threadState)
     delete chatState.threadStates[threadId]

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
+from threading import RLock
 
 
 @dataclass
@@ -15,24 +17,61 @@ class ToolExtraMetadata:
     display_name: str = ""
     icon: str = ""
     config_guide: str = ""
+    group: str = ""
+    package_slug: str = ""
+    risk_level: str = "read"
+    requires_approval: bool = False
+    version: str = "1"
+    source: str = "builtin"
+    configurable: bool = True
+    visible: bool = True
+    enabled: bool = True
 
 
 # 全局注册表: tool_name -> ToolExtraMetadata
+_registry_lock = RLock()
 _extra_registry: dict[str, ToolExtraMetadata] = {}
-# 全局工具实例列表（由 @tool 装饰器自动收集）
-_all_tool_instances: list = []
+# 按 slug 保存实例，避免模块热加载或重复导入产生重复工具。
+_tool_registry: dict[str, object] = {}
 
 
 def get_extra_metadata(tool_name: str) -> ToolExtraMetadata | None:
-    return _extra_registry.get(tool_name)
+    with _registry_lock:
+        item = _extra_registry.get(tool_name)
+        return deepcopy(item) if item is not None else None
 
 
 def get_all_extra_metadata() -> dict[str, ToolExtraMetadata]:
-    return _extra_registry.copy()
+    with _registry_lock:
+        return deepcopy(_extra_registry)
 
 
-def get_all_tool_instances() -> list:
-    return _all_tool_instances
+def get_all_tool_instances() -> tuple:
+    """返回不可变快照，调用方不能在运行中修改注册中心。"""
+    with _registry_lock:
+        return tuple(_tool_registry.values())
+
+
+def register_tool(tool_obj, metadata: ToolExtraMetadata) -> None:
+    """按 slug 原子注册工具；重复导入会替换同一 slug 的旧实现。"""
+    slug = str(getattr(tool_obj, "name", "") or "").strip()
+    if not slug:
+        raise ValueError("tool slug cannot be empty")
+    with _registry_lock:
+        _tool_registry[slug] = tool_obj
+        _extra_registry[slug] = metadata
+
+
+def unregister_tool(slug: str) -> bool:
+    """注销工具并返回是否存在。"""
+    normalized = str(slug or "").strip()
+    if not normalized:
+        return False
+    with _registry_lock:
+        existed = normalized in _tool_registry
+        _tool_registry.pop(normalized, None)
+        _extra_registry.pop(normalized, None)
+        return existed
 
 
 def tool(
@@ -45,6 +84,9 @@ def tool(
     description: str | None = None,
     args_schema: type | None = None,
     return_direct: bool = False,
+    package_slug: str = "",
+    risk_level: str = "read",
+    requires_approval: bool = False,
 ):
     """基于 langchain.tool 的拓展装饰器，同时注册元数据与收集实例。
 
@@ -63,12 +105,13 @@ def tool(
 
     def decorator(func: Callable) -> Callable:
         tool_obj = langchain_decorator(func)
-        _extra_registry[tool_obj.name] = ToolExtraMetadata(
+        metadata = ToolExtraMetadata(
             category=category, tags=tags or [], display_name=display_name,
-            icon=icon, config_guide=config_guide,
+            icon=icon, config_guide=config_guide, package_slug=package_slug,
+            risk_level=risk_level, requires_approval=requires_approval,
         )
         tool_obj.handle_tool_error = True
-        _all_tool_instances.append(tool_obj)
+        register_tool(tool_obj, metadata)
         # 注册发生在运行期时，让工具元数据快照立即失效；导入期循环依赖则安全忽略。
         try:
             from datadeck.agents.toolkits.service import invalidate_tool_metadata_cache

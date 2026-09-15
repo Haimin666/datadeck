@@ -3,31 +3,74 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.db import get_db
-from server.deps import get_required_user
+from server.deps import get_required_user, get_role_permissions, get_role_agent_slugs, require_agent_access
 from server.models import User, Agent, ScheduledTask
-from datadeck.agents.toolkits.service import get_tool_metadata
+from datadeck.agents.toolkits.service import get_tool_descriptors
+from datadeck.agents.policy import DATA_AGENT_POLICY
+from datadeck.agents.toolkits.packages import (
+    TOOL_PACKAGES,
+    mcp_package_options,
+    mcp_server_slug_from_package,
+)
+from datadeck.ports.tools import ToolDescriptor
+from server.services.mcp.service import get_all_mcp_servers
+from server.services.skills.service import list_accessible_skills
 
 agent = APIRouter(prefix="/agent", tags=["agent"])
+DATA_AGENT_FIXED_PACKAGES = set(DATA_AGENT_POLICY.fixed_packages)
 
 
-def _configurable_items(knowledge_options: list[dict] | None = None,
-                        subagent_options: list[dict] | None = None) -> dict:
-    tools = get_tool_metadata()
+def _configurable_items(
+    *,
+    backend_id: str = "ChatbotAgent",
+    knowledge_options: list[dict] | None = None,
+    skill_options: list[dict] | None = None,
+    mcp_options: list[dict] | None = None,
+    subagent_options: list[dict] | None = None,
+) -> dict:
+    # 能力包是配置页唯一入口；包内成员只在运行时展开，不重复暴露给用户选择。
+    tool_options = get_tool_descriptors(
+        include_internal=False,
+        fixed_packages=DATA_AGENT_FIXED_PACKAGES if backend_id == "DataAgent" else set()
+    )
+    for item in mcp_package_options(mcp_options):
+        tool_options.append(ToolDescriptor(
+            slug=item["slug"],
+            name=item["name"],
+            description=item["description"],
+            kind="package",
+            group="mcp",
+            package_slug=item["package_slug"],
+            source="postgres",
+            category="mcp",
+            version="1",
+            configurable=True,
+            visible=True,
+            fixed=False,
+            metadata=item.get("metadata", {}),
+        ))
     return {
+        "model": {
+            "name": "模型",
+            "description": "为该智能体选择默认聊天模型；留空使用系统默认模型",
+            "type": "string",
+            "kind": "llm",
+            "default": "",
+        },
         "tools": {
-            "name": "工具",
-            "description": "启用的工具，留空使用智能体默认配置",
+            "name": "工具包",
+            "description": "按工具包挂载平台、文件、数据和内置工具；留空使用智能体默认配置",
             "type": "list",
             "kind": "tools",
             "options": [
-                {"value": tool["slug"], "name": tool["name"], "description": tool["description"]}
-                for tool in tools
+                tool.to_dict()
+                for tool in tool_options
             ],
         },
         "knowledges": {
@@ -42,14 +85,7 @@ def _configurable_items(knowledge_options: list[dict] | None = None,
             "description": "启用的 Skill slug 列表",
             "type": "list",
             "kind": "skills",
-            "options": [],
-        },
-        "mcps": {
-            "name": "MCP 服务",
-            "description": "启用的 MCP 服务 slug 列表",
-            "type": "list",
-            "kind": "mcp",
-            "options": [],
+            "options": skill_options or [],
         },
         "subagents": {
             "name": "子智能体",
@@ -66,6 +102,12 @@ def _require_admin(user: User) -> None:
         raise HTTPException(status_code=403, detail="需要管理员权限")
 
 
+async def _require_agent_manager(db: AsyncSession, user: User) -> None:
+    _require_admin(user)
+    if "agents" not in await get_role_permissions(db, user.role):
+        raise HTTPException(status_code=403, detail="没有智能体管理权限")
+
+
 class AgentCreate(BaseModel):
     name: str
     backend_id: str = "ChatbotAgent"
@@ -74,7 +116,8 @@ class AgentCreate(BaseModel):
     config_json: dict | None = None
     icon: str | None = None
     share_config: dict | None = None
-    is_subagent: bool = False
+    execution_role: str = Field(default="standalone", pattern="^(standalone|subagent)$")
+    delegation_enabled: bool = False
 
 
 class AgentUpdate(BaseModel):
@@ -83,7 +126,100 @@ class AgentUpdate(BaseModel):
     config_json: dict | None = None
     icon: str | None = None
     share_config: dict | None = None
-    is_subagent: bool | None = None
+    execution_role: str | None = Field(default=None, pattern="^(standalone|subagent)$")
+    delegation_enabled: bool | None = None
+
+
+def _validate_agent_config(config_json: dict | None) -> None:
+    """校验 Agent 持久化配置只使用能力包作为工具选择。"""
+    if config_json is None:
+        return
+    if not isinstance(config_json, dict):
+        raise HTTPException(status_code=422, detail="Agent 配置必须是对象")
+    context = config_json.get("context", config_json)
+    if not isinstance(context, dict):
+        raise HTTPException(status_code=422, detail="Agent context 必须是对象")
+    selected = context.get("tools")
+    if selected is None:
+        return
+    if not isinstance(selected, list) or any(not isinstance(item, str) for item in selected):
+        raise HTTPException(status_code=422, detail="tools 必须是工具包 slug 列表")
+    invalid = sorted({
+        item for item in selected
+        if item not in TOOL_PACKAGES and not mcp_server_slug_from_package(item)
+    })
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail=f"tools 只能选择工具包，非法项：{', '.join(invalid)}",
+        )
+
+
+async def _validate_collaboration_config(
+    db: AsyncSession,
+    role: str,
+    delegation_enabled: bool,
+    config_json: dict | None,
+    *,
+    agent_slug: str | None = None,
+) -> None:
+    if role == "subagent" and delegation_enabled:
+        raise HTTPException(status_code=422, detail="子智能体不能启用任务委派")
+    if not delegation_enabled:
+        return
+    context = (config_json or {}).get("context", config_json or {})
+    selected = context.get("subagents") if isinstance(context, dict) else None
+    if not isinstance(selected, list) or not [item for item in selected if isinstance(item, str) and item.strip()]:
+        raise HTTPException(status_code=422, detail="启用任务委派时必须至少选择一个子智能体")
+    slugs = [item.strip() for item in selected if isinstance(item, str) and item.strip()]
+    if len(slugs) != len(set(slugs)):
+        raise HTTPException(status_code=422, detail="子智能体不能重复选择")
+    if agent_slug and agent_slug in slugs:
+        raise HTTPException(status_code=422, detail="智能体不能委派给自己")
+    rows = await db.execute(select(Agent.slug).where(
+        Agent.slug.in_(slugs),
+        Agent.execution_role == "subagent",
+    ))
+    existing = set(rows.scalars().all())
+    missing = set(slugs) - existing
+    if missing:
+        raise HTTPException(status_code=422, detail="所选子智能体不存在或不是子智能体")
+    workflow = context.get("subagent_workflow") if isinstance(context, dict) else None
+    if workflow is None:
+        return
+    if not isinstance(workflow, dict):
+        raise HTTPException(status_code=422, detail="子智能体编排格式非法")
+    nodes = workflow.get("nodes")
+    edges = workflow.get("edges", [])
+    if not isinstance(nodes, list) or not nodes or len(nodes) > 8 or not isinstance(edges, list):
+        raise HTTPException(status_code=422, detail="子智能体编排需包含 1-8 个节点")
+    node_ids: set[str] = set()
+    workflow_slugs: set[str] = set()
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise HTTPException(status_code=422, detail="子智能体编排节点格式非法")
+        node_id = str(node.get("id") or "").strip()
+        node_slug = str(node.get("subagent_slug") or "").strip()
+        task = str(node.get("task_template") or "").strip()
+        if not node_id or node_id in node_ids or not node_slug or not task:
+            raise HTTPException(status_code=422, detail="每个编排节点都需要唯一标识、子智能体和任务说明")
+        node_ids.add(node_id)
+        workflow_slugs.add(node_slug)
+    if workflow_slugs != set(slugs):
+        raise HTTPException(status_code=422, detail="编排节点必须与已选择的子智能体完全一致")
+    dependencies: dict[str, set[str]] = {node_id: set() for node_id in node_ids}
+    for edge in edges:
+        source = str(edge.get("source") or "").strip() if isinstance(edge, dict) else ""
+        target = str(edge.get("target") or "").strip() if isinstance(edge, dict) else ""
+        if not source or not target or source == target or source not in node_ids or target not in node_ids:
+            raise HTTPException(status_code=422, detail="编排连线必须连接两个不同的有效节点")
+        dependencies[target].add(source)
+    resolved: set[str] = set()
+    while len(resolved) < len(node_ids):
+        ready = {node_id for node_id, deps in dependencies.items() if node_id not in resolved and deps <= resolved}
+        if not ready:
+            raise HTTPException(status_code=422, detail="子智能体编排不能包含循环依赖")
+        resolved.update(ready)
 
 
 def _serialize_agent(agent: Agent, current_user: User) -> dict:
@@ -96,6 +232,62 @@ async def _get_agent_by_identifier(db: AsyncSession, identifier: str) -> Agent |
     return (await db.execute(
         select(Agent).where(or_(Agent.id == identifier, Agent.slug == identifier))
     )).scalar_one_or_none()
+
+
+async def _get_configurable_items(
+    db: AsyncSession, current_user: User, backend_id: str = "ChatbotAgent"
+) -> dict:
+    """Return the same runtime resource catalogue for new and existing agents."""
+    from server.services.knowledge_service import list_knowledge_bases
+
+    permissions = set(await get_role_permissions(db, current_user.role))
+    knowledge_options = []
+    if "knowledge" in permissions:
+        knowledge_options = [
+            {
+                "slug": item["kb_id"] if item.get("kb_id") else item["id"],
+                "name": item["name"],
+                "description": item.get("description", ""),
+                "group": "knowledge",
+            }
+            for item in await list_knowledge_bases(db, current_user.uid)
+        ]
+    accessible_skills = (
+        await list_accessible_skills(db, current_user, require_enabled=False)
+        if "extensions" in permissions else []
+    )
+    skill_options = [
+        {"slug": item.slug, "name": item.name, "description": item.description or "", "group": "skill"}
+        for item in accessible_skills
+        if item.source_scope != "builtin"
+    ]
+    mcp_options = []
+    if "extensions" in permissions:
+        mcp_options = [
+            {"slug": item.slug, "name": item.name, "description": item.description or "", "group": "mcp"}
+            for item in await get_all_mcp_servers(db)
+            if bool(item.enabled)
+        ]
+    subagents = []
+    if "agents" in permissions:
+        subagent_query = select(Agent).where(
+            Agent.execution_role == "subagent",
+        ).order_by(Agent.name)
+        allowed = await get_role_agent_slugs(db, current_user.role)
+        if allowed is not None:
+            subagent_query = subagent_query.where(Agent.slug.in_(allowed))
+        subagents = (await db.execute(subagent_query)).scalars().all()
+    subagent_options = [
+        {"slug": item.slug, "name": item.name, "description": item.description or "", "group": "subagent"}
+        for item in subagents
+    ]
+    return _configurable_items(
+        backend_id=backend_id,
+        knowledge_options=knowledge_options,
+        skill_options=skill_options,
+        mcp_options=mcp_options,
+        subagent_options=subagent_options,
+    )
 
 
 @agent.get("/backends")
@@ -121,11 +313,15 @@ async def list_backends():
 
 
 @agent.get("")
-async def list_agents(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_required_user)):
-    """列出所有智能体。"""
+async def list_agents(
+    include_subagents: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_required_user),
+):
+    """列出当前角色可用的主 Agent；管理编排页可显式包含子 Agent。"""
     result = await db.execute(select(Agent).order_by(Agent.is_builtin.desc(), Agent.name))
-    agents = result.scalars().all()
-    if not agents:
+    all_agents = result.scalars().all()
+    if not all_agents:
         # 插入内置默认智能体
         builtin = Agent(
             id="default-chatbot",
@@ -138,7 +334,11 @@ async def list_agents(db: AsyncSession = Depends(get_db), current_user: User = D
         db.add(builtin)
         await db.commit()
         await db.refresh(builtin)
-        return {"agents": [_serialize_agent(builtin, current_user)]}
+        all_agents = [builtin]
+    if not include_subagents:
+        all_agents = [item for item in all_agents if item.execution_role != "subagent"]
+    allowed = await get_role_agent_slugs(db, current_user.role)
+    agents = all_agents if allowed is None else [item for item in all_agents if item.slug in allowed]
     return {"agents": [_serialize_agent(a, current_user) for a in agents]}
 
 
@@ -159,6 +359,16 @@ async def get_default_agent(
     return {"agent": _serialize_agent(builtin, current_user)}
 
 
+@agent.get("/configurable-items")
+async def get_configurable_items(
+    backend_id: str = "ChatbotAgent",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_required_user),
+):
+    """Resources selectable while an agent is still a creation draft."""
+    return {"configurable_items": await _get_configurable_items(db, current_user, backend_id)}
+
+
 @agent.get("/{agent_id}")
 async def get_agent(
     agent_id: str,
@@ -168,20 +378,11 @@ async def get_agent(
     a = await _get_agent_by_identifier(db, agent_id)
     if not a:
         raise HTTPException(status_code=404, detail="智能体不存在")
-    from server.services.knowledge_service import list_knowledge_bases
-
-    knowledge_options = await list_knowledge_bases(db, current_user.uid)
-    subagents = (await db.execute(
-        select(Agent).where(Agent.is_subagent == True).order_by(Agent.name)  # noqa: E712
-    )).scalars().all()
-    subagent_options = [
-        {"value": item.slug, "name": item.name, "description": item.description or ""}
-        for item in subagents
-    ]
+    await require_agent_access(db, current_user, a.slug)
     return {
         "agent": {
             **_serialize_agent(a, current_user),
-            "configurable_items": _configurable_items(knowledge_options, subagent_options),
+            "configurable_items": await _get_configurable_items(db, current_user, a.backend_id),
         }
     }
 
@@ -192,11 +393,14 @@ async def create_agent(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    _require_admin(current_user)
+    await _require_agent_manager(db, current_user)
     slug = payload.slug or payload.name
     existing = await db.execute(select(Agent).where(Agent.slug == slug))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="slug 已存在")
+    role = payload.execution_role
+    _validate_agent_config(payload.config_json)
+    await _validate_collaboration_config(db, role, payload.delegation_enabled, payload.config_json, agent_slug=slug)
     a = Agent(
         id=str(uuid.uuid4()),
         slug=slug,
@@ -206,7 +410,8 @@ async def create_agent(
         config_json=payload.config_json or {},
         icon=payload.icon,
         share_config=payload.share_config or {},
-        is_subagent=payload.is_subagent,
+        execution_role=role,
+        delegation_enabled=bool(payload.delegation_enabled) and role == "standalone",
     )
     db.add(a)
     await db.commit()
@@ -221,7 +426,7 @@ async def update_agent(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    _require_admin(current_user)
+    await _require_agent_manager(db, current_user)
     a = await _get_agent_by_identifier(db, agent_id)
     if not a:
         raise HTTPException(status_code=404, detail="智能体不存在")
@@ -229,14 +434,21 @@ async def update_agent(
         a.name = payload.name
     if payload.description is not None:
         a.description = payload.description
+    next_role = payload.execution_role or a.execution_role or "standalone"
+    if a.is_builtin and next_role != (a.execution_role or "standalone"):
+        raise HTTPException(status_code=400, detail="内置智能体不能变更运行角色")
+    next_delegation = bool(payload.delegation_enabled) if payload.delegation_enabled is not None else bool(a.delegation_enabled)
+    next_config = payload.config_json if payload.config_json is not None else a.config_json
+    _validate_agent_config(next_config)
+    await _validate_collaboration_config(db, next_role, next_delegation, next_config, agent_slug=a.slug)
     if payload.config_json is not None:
         a.config_json = payload.config_json
     if payload.icon is not None:
         a.icon = payload.icon
     if payload.share_config is not None:
         a.share_config = payload.share_config
-    if payload.is_subagent is not None:
-        a.is_subagent = payload.is_subagent
+    a.execution_role = next_role
+    a.delegation_enabled = next_delegation and next_role == "standalone"
     await db.commit()
     await db.refresh(a)
     return {"agent": _serialize_agent(a, current_user)}
@@ -248,7 +460,7 @@ async def delete_agent(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    _require_admin(current_user)
+    await _require_agent_manager(db, current_user)
     a = await _get_agent_by_identifier(db, agent_id)
     if a and a.is_builtin:
         a = None
@@ -259,6 +471,18 @@ async def delete_agent(
     )).scalar_one_or_none()
     if scheduled_task:
         raise HTTPException(status_code=409, detail="该智能体仍被定时任务引用，请先删除或改绑任务")
+    agents = (await db.execute(select(Agent).where(Agent.id != a.id))).scalars().all()
+    referenced_by = []
+    for candidate in agents:
+        raw_context = (candidate.config_json or {}).get("context", candidate.config_json or {})
+        selected = raw_context.get("subagents", []) if isinstance(raw_context, dict) else []
+        if a.slug in selected:
+            referenced_by.append(candidate.name or candidate.slug)
+    if referenced_by:
+        raise HTTPException(
+            status_code=409,
+            detail="该智能体仍被协调 Agent 引用，请先解除挂载",
+        )
     await db.delete(a)
     await db.commit()
     return {"ok": True}

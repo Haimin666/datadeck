@@ -14,6 +14,7 @@ DSN 不可用时静默放行（占位原则：跑不通不阻塞链路）。
 from __future__ import annotations
 
 import re
+from threading import RLock
 import time
 import urllib.parse
 
@@ -42,6 +43,7 @@ _SQL_FENCE_RE = re.compile(r"```sql\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 _GAVE_UP_SUFFIX = "\n\n> ⚠️ 数据自检未通过：SQL 引用的表与真实数据源不符（已自动重试仍失败），请人工核对。"
 
 _schema_cache: dict = {"key": None, "map": None, "at": 0.0}
+_schema_cache_lock = RLock()
 
 
 def extract_sql(text: str) -> str | None:
@@ -53,9 +55,10 @@ def _fetch_schema_map(force: bool = False) -> dict[str, set[str]] | None:
     """同步 hook 使用同步驱动；async hook 走对应的异步驱动。"""
     dsn = sql_dsn()
     now = time.monotonic()
-    if (not force and _schema_cache["key"] == dsn and _schema_cache["map"] is not None
-            and now - _schema_cache["at"] < _SCHEMA_CACHE_TTL):
-        return _schema_cache["map"]
+    with _schema_cache_lock:
+        if (not force and _schema_cache["key"] == dsn and _schema_cache["map"] is not None
+                and now - _schema_cache["at"] < _SCHEMA_CACHE_TTL):
+            return _schema_cache["map"]
     try:
         if sql_dialect() == "postgres":
             import psycopg
@@ -86,7 +89,8 @@ def _fetch_schema_map(force: bool = False) -> dict[str, set[str]] | None:
         schema_map = {}
         for table_name, column_name in rows:
             schema_map.setdefault(str(table_name).lower(), set()).add(str(column_name).lower())
-        _schema_cache.update({"key": dsn, "map": schema_map, "at": now})
+        with _schema_cache_lock:
+            _schema_cache.update({"key": dsn, "map": schema_map, "at": now})
         return schema_map
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"数据自检：同步元数据获取失败，跳过 ({str(exc)[:120]})")
@@ -143,9 +147,10 @@ class DataSelfCheckMiddleware(AgentMiddleware):
             return None
         now = time.monotonic()
         dsn = sql_dsn()
-        if (_schema_cache["key"] == dsn and _schema_cache["map"] is not None
-                and now - _schema_cache["at"] < _SCHEMA_CACHE_TTL):
-            return _schema_cache["map"]
+        with _schema_cache_lock:
+            if (_schema_cache["key"] == dsn and _schema_cache["map"] is not None
+                    and now - _schema_cache["at"] < _SCHEMA_CACHE_TTL):
+                return _schema_cache["map"]
         try:
             if sql_dialect() == "postgres":
                 import asyncpg
@@ -177,7 +182,8 @@ class DataSelfCheckMiddleware(AgentMiddleware):
             schema_map: dict[str, set[str]] = {}
             for row in rows:
                 schema_map.setdefault(row["table_name"].lower(), set()).add(row["column_name"].lower())
-            _schema_cache.update({"key": dsn, "map": schema_map, "at": now})
+            with _schema_cache_lock:
+                _schema_cache.update({"key": dsn, "map": schema_map, "at": now})
             return schema_map
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"数据自检：异步元数据获取失败，跳过 ({str(exc)[:120]})")

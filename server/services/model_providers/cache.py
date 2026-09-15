@@ -33,6 +33,7 @@ class ModelInfo:
     api_key: str
     base_url: str
     provider_type: str  # openai / anthropic / gemini / openrouter
+    proxy_url: str = ""
 
     # 可选配置
     headers: dict[str, str] = field(default_factory=dict)
@@ -56,6 +57,7 @@ class ModelInfo:
             "display_name": self.display_name,
             "api_key": self.api_key,
             "base_url": self.base_url,
+            "proxy_url": self.proxy_url,
             "provider_type": self.provider_type,
             "headers": self.headers,
             "extra": self.extra,
@@ -73,6 +75,7 @@ class ModelInfo:
             display_name=data["display_name"],
             api_key=data["api_key"],
             base_url=data["base_url"],
+            proxy_url=data.get("proxy_url", ""),
             provider_type=data["provider_type"],
             headers=data.get("headers", {}),
             extra=data.get("extra", {}),
@@ -157,6 +160,7 @@ class ModelCache:
                     display_name=model.get("display_name", model["id"]),
                     api_key=api_key or "",
                     base_url=base_url,
+                    proxy_url=provider.proxy_url or "",
                     provider_type=provider.provider_type,
                     headers=dict(provider.headers_json or {}),
                     extra=dict(provider.extra_json or {}),

@@ -133,6 +133,7 @@ const router = useRouter()
 const { agents, selectedAgentId, isLoadingConfig } = storeToRefs(agentStore)
 
 const syncingRouteThread = ref(false)
+let routeThreadSyncVersion = 0
 
 const getRouteThreadId = () => {
   const value = route.params.thread_id
@@ -149,6 +150,7 @@ const syncSelectedThreadFromRoute = async () => {
   if (!chatComponent?.selectThreadFromRoute) return
 
   const threadId = getRouteThreadId()
+  const syncVersion = ++routeThreadSyncVersion
   syncingRouteThread.value = true
   try {
     if (!threadId && !agentStore.isInitialized) {
@@ -156,14 +158,15 @@ const syncSelectedThreadFromRoute = async () => {
     }
 
     const ok = await chatComponent.selectThreadFromRoute(threadId)
+    if (syncVersion !== routeThreadSyncVersion || getRouteThreadId() !== threadId) return
     if (ok === null) return
     if (threadId && !ok) {
-      await router.replace({ name: 'AgentComp' })
+      await router.replace({ name: 'AgentComp', params: { thread_id: undefined } })
     }
   } catch (error) {
-    handleChatError(error, 'load')
+    if (syncVersion === routeThreadSyncVersion) handleChatError(error, 'load')
   } finally {
-    syncingRouteThread.value = false
+    if (syncVersion === routeThreadSyncVersion) syncingRouteThread.value = false
   }
 }
 
@@ -185,7 +188,11 @@ const consumeRouteAgentSelection = async () => {
   } finally {
     const nextQuery = { ...route.query }
     delete nextQuery.agent_id
-    await router.replace({ name: 'AgentComp', query: nextQuery })
+    await router.replace({
+      name: 'AgentComp',
+      params: { thread_id: undefined },
+      query: nextQuery
+    })
   }
 }
 
@@ -217,15 +224,15 @@ const handleThreadChange = (threadId) => {
   if (currentRouteThreadId === nextThreadId) return
 
   if (nextThreadId) {
-    router.replace({ name: 'AgentCompWithThreadId', params: { thread_id: nextThreadId } })
+    router.replace({ name: 'AgentComp', params: { thread_id: nextThreadId } })
   } else {
-    router.replace({ name: 'AgentComp' })
+    router.replace({ name: 'AgentComp', params: { thread_id: undefined } })
   }
 }
 
 const agentQuickSwitchOptions = computed(() =>
   (agents.value || [])
-    .filter((agent) => !agent.is_subagent)
+    .filter((agent) => agent.execution_role !== 'subagent')
     .map((agent) => ({
       label: agent.name || agent.id,
       value: agent.id,

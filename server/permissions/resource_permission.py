@@ -40,7 +40,7 @@ RESOURCE_PERMISSION_ORDER = {
     ResourcePermission.MANAGE: 2,
 }
 
-DEFAULT_SCOPE = {"access_level": "global", "department_ids": [], "user_uids": []}
+DEFAULT_SCOPE = {"access_level": "global", "user_uids": []}
 KNOWLEDGE_BASE_PERMISSION_POLICY = ResourcePermissionPolicy(
     role_ceiling={
         "user": ResourcePermission.READ,
@@ -67,21 +67,16 @@ def _normalize_scope(scope: dict | None) -> dict | None:
         raise ValueError("权限范围必须是对象")
 
     access_level = scope.get("access_level") or "global"
-    if access_level not in {"global", "department", "user"}:
+    if access_level not in {"global", "user"}:
         raise ValueError("无效的资源权限范围")
 
     if access_level == "global":
         return DEFAULT_SCOPE.copy()
-    if access_level == "department":
-        department_ids = sorted({int(value) for value in scope.get("department_ids") or []})
-        if not department_ids:
-            raise ValueError("部门权限至少需要选择一个部门")
-        return {"access_level": access_level, "department_ids": department_ids, "user_uids": []}
 
     user_uids = sorted({str(value).strip() for value in scope.get("user_uids") or [] if str(value).strip()})
     if not user_uids:
         raise ValueError("指定用户权限至少需要选择一个用户")
-    return {"access_level": access_level, "department_ids": [], "user_uids": user_uids}
+    return {"access_level": access_level, "user_uids": user_uids}
 
 
 def _validate_manage_scope(read_scope: dict | None, manage_scope: dict | None) -> None:
@@ -94,10 +89,7 @@ def _validate_manage_scope(read_scope: dict | None, manage_scope: dict | None) -
     manage_level = manage_scope["access_level"]
     if manage_level != read_level:
         raise ValueError("管理范围必须包含在读取范围内")
-    if read_level == manage_level == "department":
-        if not set(manage_scope["department_ids"]).issubset(read_scope["department_ids"]):
-            raise ValueError("管理范围必须包含在读取范围内")
-    elif read_level == manage_level == "user":
+    if read_level == manage_level == "user":
         if not set(manage_scope["user_uids"]).issubset(read_scope["user_uids"]):
             raise ValueError("管理范围必须包含在读取范围内")
 
@@ -142,12 +134,6 @@ def scope_matches(user: Any, scope: dict | None) -> bool:
     access_level = scope.get("access_level")
     if access_level == "global":
         return True
-    if access_level == "department":
-        department_id = _value(user, "department_id")
-        try:
-            return department_id is not None and int(department_id) in scope.get("department_ids", [])
-        except (TypeError, ValueError):
-            return False
     if access_level == "user":
         return str(_value(user, "uid", "") or "") in scope.get("user_uids", [])
     return False

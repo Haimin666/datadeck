@@ -196,7 +196,7 @@
                 v-else
                 ref="shareConfigFormRef"
                 v-model="shareConfigForm"
-                :auto-select-user-dept="true"
+                :auto-select-current-user="true"
                 :allowed-access-levels="allowedSkillAccessLevels"
               />
             </section>
@@ -430,7 +430,7 @@ const enabledForm = ref(true)
 const shareConfigFormRef = ref(null)
 const shareConfigForm = ref({
   version: 2,
-  read_scope: { access_level: 'user', department_ids: [], user_uids: [] },
+  read_scope: { access_level: 'user', user_uids: [] },
   manage_scope: null
 })
 const dependencyOptions = reactive({ tools: [], mcps: [], skills: [] })
@@ -441,7 +441,10 @@ const dependencyForm = reactive({
 })
 const dependencySearch = reactive({ tools: '', mcps: '', skills: '' })
 
-const isInstalledSkill = computed(() => !!currentSkill.value?.dir_path)
+const isInstalledSkill = computed(() =>
+  !!currentSkill.value?.dir_path || currentSkill.value?.source_type === 'personal'
+)
+const isPersonalSkill = computed(() => currentSkill.value?.source_type === 'personal')
 
 const isBuiltinInstalledSkill = computed(() => {
   return !!(isInstalledSkill.value && currentSkill.value?.source_type === 'builtin')
@@ -449,7 +452,7 @@ const isBuiltinInstalledSkill = computed(() => {
 const canManageCurrentSkill = computed(() => currentSkill.value?.can_manage !== false)
 const isReadOnlySkill = computed(() => isInstalledSkill.value && !canManageCurrentSkill.value)
 const canEditSkillFiles = computed(
-  () => canManageCurrentSkill.value && !isBuiltinInstalledSkill.value
+  () => canManageCurrentSkill.value && (isPersonalSkill.value || !isBuiltinInstalledSkill.value)
 )
 const canEditSkillDependencies = computed(
   () => canManageCurrentSkill.value && !isBuiltinInstalledSkill.value
@@ -561,20 +564,17 @@ const cloneShareConfig = (config) => ({
       ? config.read_scope
         ? {
             access_level: config.read_scope.access_level || 'global',
-            department_ids: [...(config.read_scope.department_ids || [])],
             user_uids: [...(config.read_scope.user_uids || [])]
           }
         : null
       : {
           access_level: config?.access_level || 'user',
-          department_ids: [...(config?.department_ids || [])],
           user_uids: [...(config?.user_uids || [])]
         },
   manage_scope:
     config?.version === 2 && config.manage_scope
       ? {
           access_level: config.manage_scope.access_level || 'global',
-          department_ids: [...(config.manage_scope.department_ids || [])],
           user_uids: [...(config.manage_scope.user_uids || [])]
         }
       : null
@@ -588,7 +588,7 @@ const syncShareConfigFromSkill = (skillRecord) => {
 const fetchSkillDetail = async () => {
   loading.value = true
   try {
-    const skillResult = await skillApi.listSkills()
+    const skillResult = await skillApi.listSkillCards()
     skills.value = skillResult?.data || []
     allowedSkillAccessLevels.value = skillResult?.allowed_access_levels || ['user']
 
@@ -648,7 +648,9 @@ const reloadTree = async () => {
   if (!currentSkill.value || !isInstalledSkill.value) return
   loading.value = true
   try {
-    const result = await skillApi.getSkillTree(currentSkill.value.slug)
+    const result = isPersonalSkill.value
+      ? await skillApi.getPersonalSkillTree(currentSkill.value.slug)
+      : await skillApi.getSkillTree(currentSkill.value.slug)
     const normalized = normalizeTree(result?.data || [])
     treeData.value = normalized
     expandedKeys.value = []
@@ -661,7 +663,9 @@ const reloadTree = async () => {
 
 const loadSkillFile = async (skillSlug, path = 'SKILL.md') => {
   try {
-    const fileResult = await skillApi.getSkillFile(skillSlug, path)
+    const fileResult = isPersonalSkill.value
+      ? await skillApi.getPersonalSkillFile(skillSlug, path)
+      : await skillApi.getSkillFile(skillSlug, path)
     const content = fileResult?.data?.content || ''
     fileContent.value = content
     selectedPath.value = path
@@ -688,7 +692,9 @@ const handleTreeSelect = async (keys, info) => {
     return
   }
   try {
-    const result = await skillApi.getSkillFile(currentSkill.value.slug, path)
+    const result = isPersonalSkill.value
+      ? await skillApi.getPersonalSkillFile(currentSkill.value.slug, path)
+      : await skillApi.getSkillFile(currentSkill.value.slug, path)
     const content = result?.data?.content || ''
     fileContent.value = content
   } catch {
@@ -701,7 +707,10 @@ const saveCurrentFile = async (content = fileContent.value) => {
     return
   savingFile.value = true
   try {
-    await skillApi.updateSkillFile(currentSkill.value.slug, {
+    const updateFile = isPersonalSkill.value
+      ? skillApi.updatePersonalSkillFile
+      : skillApi.updateSkillFile
+    await updateFile(currentSkill.value.slug, {
       path: selectedPath.value,
       content
     })
@@ -765,7 +774,10 @@ const handleCreateNode = async () => {
   if (!currentSkill.value || !createForm.path.trim() || !canEditSkillFiles.value) return
   creatingNode.value = true
   try {
-    await skillApi.createSkillFile(currentSkill.value.slug, {
+    const createFile = isPersonalSkill.value
+      ? skillApi.createPersonalSkillFile
+      : skillApi.createSkillFile
+    await createFile(currentSkill.value.slug, {
       path: createForm.path.trim(),
       is_dir: createForm.isDir,
       content: createForm.content

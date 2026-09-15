@@ -325,6 +325,8 @@ async def get_mcp_server_tools(
         try:
             # 获取所有工具（不过滤 disabled_tools）
             tools = await get_all_mcp_tools(slug)
+            if not tools and get_mcp_tools_stats(slug) is None:
+                raise HTTPException(status_code=502, detail="MCP 已连接但工具发现失败，请检查 URL、认证头和服务端协议")
             tool_list = []
 
             for tool in tools:
@@ -352,6 +354,8 @@ async def get_mcp_server_tools(
                 "data": tool_list,
                 "total": len(tool_list),
             }
+        except HTTPException:
+            raise
         except Exception as tool_error:
             logger.error(f"Failed to get tools from MCP server '{slug}': {tool_error}")
             raise HTTPException(status_code=500, detail=f"获取工具失败: {str(tool_error)}")
@@ -376,6 +380,8 @@ async def refresh_mcp_server_tools(
         try:
             # 获取所有工具（不过滤 disabled_tools）
             tools = await get_all_mcp_tools(slug)
+            if not tools and get_mcp_tools_stats(slug) is None:
+                raise HTTPException(status_code=502, detail="MCP 连接成功但工具发现失败，请检查 URL、认证头和服务端协议")
 
             # 获取统计信息
             stats = get_mcp_tools_stats(slug)
@@ -395,6 +401,8 @@ async def refresh_mcp_server_tools(
                 "enabled_count": enabled_count,
                 "disabled_count": disabled_count,
             }
+        except HTTPException:
+            raise
         except Exception as tool_error:
             raise HTTPException(status_code=500, detail=f"刷新失败: {str(tool_error)}")
     except HTTPException:

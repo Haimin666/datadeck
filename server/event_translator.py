@@ -1,6 +1,6 @@
 """datadeck 事件翻译层：LangGraph 图产物 → run_events 表（SSE 消费的唯一来源）。
 
-职责（对应 DEVELOPMENT.md §2.5，成败关键层）：
+职责（对应当前统一分层方案的事件边界）：
 - consume_graph_stream: 消费 graph.astream(["messages", "updates"])，逐条翻译为
   envelope 事件并写入 run_events；interrupt 翻译为 human_approval_required；
   updates 中非 messages 的结构化 state（todos/artifacts/token_usage/sql_validation）
@@ -10,7 +10,7 @@
 envelope（前端 messageProcessor.js / AgentChatComponent.handleSSEEvent 契约）：
   data: {"event": <type>, "payload": {...}}  ← event 字段，非 event_type
 事件类型：init / stream_event(message_delta|tool_call) / human_approval_required
-  / agent_state / finished / end / error
+  / agent_state / runtime_snapshot / runtime_diagnostic / finished / end / error
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from typing import Any, AsyncIterator
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.types import Command
 from sqlalchemy import text as sa_text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.config import settings
 from server.db import async_session_factory
@@ -67,25 +68,50 @@ async def append_event(
     无订阅者时 publish 是空操作，不影响落库语义。
     """
     async with async_session_factory() as session:
-        ev = RunEvent(
-            id=str(uuid.uuid4()),
-            run_id=run_id,
-            event_type=event_type,
-            payload=payload,
-            thread_id=thread_id,
-        )
-        session.add(ev)
+        ev = await _persist_event(session, run_id, event_type, payload, thread_id)
         await session.commit()
-        await session.refresh(ev)
         seq = int(ev.seq) if ev.seq is not None else 0
     publish_run_event(run_id, seq, event_type, payload)
 
 
-def _human_approval_payload(interrupt_value: dict) -> dict:
+async def _persist_event(
+    session: AsyncSession,
+    run_id: str,
+    event_type: str,
+    payload: dict,
+    thread_id: str | None = None,
+) -> RunEvent:
+    """在调用方事务中写入事件；提交后由调用方发布到实时总线。"""
+    event = RunEvent(
+        id=str(uuid.uuid4()),
+        run_id=run_id,
+        event_type=event_type,
+        payload=payload,
+        thread_id=thread_id,
+    )
+    session.add(event)
+    await session.flush()
+    await session.refresh(event)
+    return event
+
+
+def _publish_persisted_events(events: list[RunEvent]) -> None:
+    """事务提交后发布事件，避免 SSE 看到未提交记录。"""
+    for event in events:
+        publish_run_event(
+            event.run_id,
+            int(event.seq) if event.seq is not None else 0,
+            event.event_type,
+            event.payload or {},
+        )
+
+
+def _human_approval_payload(interrupt_value: dict, context: object | None = None) -> dict:
     """HITLRequest → 前端 approvalState 契约（tool_calls + tool_names + actionRequests）。"""
     requests = interrupt_value.get("action_requests") or []
     tool_calls = [
-        {"id": f"tc-{i}", "name": r.get("name", ""), "args": r.get("args", {})}
+        {"id": f"tc-{i}", "name": r.get("name", ""), "args": r.get("args", {}),
+         "descriptor": _tool_descriptor(str(r.get("name") or ""), context)}
         for i, r in enumerate(requests)
     ]
     return {
@@ -94,6 +120,21 @@ def _human_approval_payload(interrupt_value: dict) -> dict:
         "tool_names": [r.get("name", "") for r in requests],
         "actionRequests": requests,
         "review_configs": interrupt_value.get("review_configs") or [],
+    }
+
+
+def _user_question_payload(interrupt_value: dict, run_id: str, thread_id: str, request_id: str | None) -> dict:
+    """将通用 interrupt 中的 ask_user_question 转为前端可恢复协议。"""
+    return {
+        "reason": "ask_user_question",
+        "chunk": {
+            "status": "ask_user_question_required",
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "run_id": run_id,
+            "questions": interrupt_value.get("questions") or [],
+            "interrupt_info": interrupt_value,
+        },
     }
 
 
@@ -132,8 +173,13 @@ def _message_delta_chunk(message_id: str, content: str, thread_id: str, request_
     }
 
 
-def _tool_call_chunk(message_id: str, tc: dict, thread_id: str, request_id: str | None) -> dict:
+def _tool_call_chunk(
+    message_id: str, tc: dict, thread_id: str, request_id: str | None,
+    context: object | None = None,
+) -> dict:
     """工具调用 chunk（stream_event.type=tool_call，前端 tool_call_chunks 消费）。"""
+    tool_name = str(tc.get("name") or "")
+    descriptor = _tool_descriptor(tool_name, context)
     return {
         "status": "loading",
         "request_id": request_id,
@@ -145,8 +191,34 @@ def _tool_call_chunk(message_id: str, tc: dict, thread_id: str, request_id: str 
             "name": tc.get("name", ""),
             "args": tc.get("args", {}),
             "thread_id": thread_id,
+            "descriptor": descriptor,
         },
     }
+
+
+def _tool_descriptor(tool_name: str, context: object | None = None) -> dict[str, Any] | None:
+    """为 Trace 补充统一工具 Schema，不把平台授权状态写入全局工具对象。"""
+    if not tool_name:
+        return None
+    runtime_descriptors = getattr(context, "runtime_tool_descriptors", {}) if context else {}
+    if isinstance(runtime_descriptors, dict):
+        descriptor = runtime_descriptors.get(tool_name)
+        if isinstance(descriptor, dict):
+            return dict(descriptor)
+    try:
+        from datadeck.agents.toolkits.service import get_tool_descriptors
+
+        item = next((value for value in get_tool_descriptors() if value.slug == tool_name), None)
+        if item is None:
+            return None
+        payload = item.to_dict()
+        return {
+            key: payload[key]
+            for key in ("slug", "package_slug", "kind", "category", "source",
+                        "version", "risk_level", "requires_approval")
+        }
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def consume_graph_stream(
@@ -175,16 +247,22 @@ async def consume_graph_stream(
         return
     interrupts: list = []
     error: Exception | None = None
+    diagnostic_cursor = len(getattr(context, "_runtime_diagnostics", []) or []) if context else 0
+
+    async def flush_runtime_diagnostics() -> None:
+        """把建图后的动态资源问题及时落库，避免前端只看到长时间 loading。"""
+        nonlocal diagnostic_cursor
+        if context is None:
+            return
+        diagnostics = getattr(context, "_runtime_diagnostics", []) or []
+        for diagnostic in diagnostics[diagnostic_cursor:]:
+            if isinstance(diagnostic, dict):
+                await append_event(run_id, "runtime_diagnostic", diagnostic, thread_id)
+        diagnostic_cursor = len(diagnostics)
 
     request_id, _ = await _load_run_run_context(run_id)
     # run 内稳定的 AI message_id：所有 message_delta 归入同一条前端消息
     ai_message_id = f"{run_id}-ai"
-
-    async with async_session_factory() as db:
-        await db.execute(sa_text(
-            "UPDATE agent_runs SET status='running', started_at=:now WHERE id=:rid"
-        ), {"now": utc_now_naive(), "rid": run_id})
-        await db.commit()
 
     try:
         async for mode, payload in graph.astream(
@@ -210,12 +288,22 @@ async def consume_graph_stream(
                     if not isinstance(upd, dict):
                         continue
                     messages = upd.get("messages") or []
+                    if any(
+                        getattr(message, "type", "") == "remove"
+                        or message.__class__.__name__ == "RemoveMessage"
+                        for message in messages
+                    ):
+                        await append_event(run_id, "context_compression", {
+                            "message": "上下文已压缩：前面的历史消息仍可在此分界线之前查看。",
+                        }, thread_id)
                     last = messages[-1] if messages else None
                     tool_calls = getattr(last, "tool_calls", None) if last is not None else None
                     if tool_calls:
                         for tc in tool_calls:
                             await append_event(run_id, "messages", {
-                                "chunk": _tool_call_chunk(ai_message_id, tc, thread_id, request_id),
+                                "chunk": _tool_call_chunk(
+                                    ai_message_id, tc, thread_id, request_id, context,
+                                ),
                             }, thread_id)
                     state = _extract_agent_state(upd)
                     if state:
@@ -225,41 +313,58 @@ async def consume_graph_stream(
                                       "thread_id": thread_id, "request_id": request_id},
                             "agent_state": state,
                         }, thread_id)
+            await flush_runtime_diagnostics()
     except Exception as exc:  # noqa: BLE001
         error = exc
 
+    persisted_events: list[RunEvent] = []
     async with async_session_factory() as db:
         if error is not None:
-            await db.execute(sa_text(
+            status_update = await db.execute(sa_text(
                 "UPDATE agent_runs SET status='failed', error_type=:et, error_message=:em, "
-                "finished_at=:now WHERE id=:rid"
+                "finished_at=:now, updated_at=:now WHERE id=:rid AND status='running' "
+                "RETURNING status"
             ), {
                 "et": type(error).__name__, "em": str(error)[:500],
                 "now": utc_now_naive(), "rid": run_id,
             })
-            await db.commit()
-            await append_event(run_id, "error", {
+            # 取消、超时回收或其他实例已经完成状态迁移时，当前图不能再把
+            # 终态改写成 failed，也不能重复发送一条相互矛盾的 end 事件。
+            if status_update.fetchone() is None:
+                await db.commit()
+                return
+            persisted_events.append(await _persist_event(db, run_id, "error", {
                 "chunk": {"status": "error", "message": str(error)[:500],
                           "error_type": type(error).__name__, "request_id": request_id},
-            }, thread_id)
-            await append_event(run_id, "end", {
+            }, thread_id))
+            persisted_events.append(await _persist_event(db, run_id, "end", {
                 "status": "failed",
                 "chunk": {"status": "finished", "request_id": request_id},
                 "run": {"id": run_id, "status": "failed"},
-            }, thread_id)
+            }, thread_id))
+            await db.commit()
+            _publish_persisted_events(persisted_events)
             return
 
         if interrupts:
-            await db.execute(sa_text(
-                "UPDATE agent_runs SET status='interrupted', finished_at=:now WHERE id=:rid"
+            status_update = await db.execute(sa_text(
+                "UPDATE agent_runs SET status='interrupted', finished_at=:now, updated_at=:now "
+                "WHERE id=:rid AND status='running' RETURNING status"
             ), {"now": utc_now_naive(), "rid": run_id})
-            await db.commit()
+            if status_update.fetchone() is None:
+                await db.commit()
+                return
             for iv in interrupts:
                 value = iv.value if hasattr(iv, "value") else iv
-                approval = _human_approval_payload(value or {})
+                if isinstance(value, dict) and value.get("kind") == "ask_user_question":
+                    persisted_events.append(await _persist_event(db, run_id, "interrupt", _user_question_payload(
+                        value, run_id, thread_id, request_id,
+                    ), thread_id))
+                    continue
+                approval = _human_approval_payload(value or {}, context)
                 requests = approval.get("actionRequests") or []
                 review_configs = approval.get("review_configs") or []
-                await append_event(run_id, "interrupt", {
+                persisted_events.append(await _persist_event(db, run_id, "interrupt", {
                     "reason": "human_approval",
                     "chunk": {
                         "status": "human_approval_required",
@@ -275,22 +380,29 @@ async def consume_graph_stream(
                         "tool_names": approval.get("tool_names") or [],
                         "actionRequests": requests,
                     },
-                }, thread_id)
+                }, thread_id))
+            await db.commit()
+            _publish_persisted_events(persisted_events)
             return
 
-        await db.execute(sa_text(
-            "UPDATE agent_runs SET status='completed', finished_at=:now WHERE id=:rid"
+        status_update = await db.execute(sa_text(
+            "UPDATE agent_runs SET status='completed', finished_at=:now, updated_at=:now "
+            "WHERE id=:rid AND status='running' RETURNING status"
         ), {"now": utc_now_naive(), "rid": run_id})
-        await db.commit()
-        await append_event(run_id, "end", {
+        if status_update.fetchone() is None:
+            await db.commit()
+            return
+        persisted_events.append(await _persist_event(db, run_id, "end", {
             "status": "completed",
             "chunk": {"status": "finished", "request_id": request_id},
             "run": {"id": run_id, "status": "completed"},
-        }, thread_id)
+        }, thread_id))
+        await db.commit()
+        _publish_persisted_events(persisted_events)
 
 
 def parse_after_seq(raw: str | None) -> int:
-    """Last-Event-ID / after_seq → 数字游标（兼容纯数字与 "major-minor"）。"""
+    """解析统一的 Last-Event-ID / after_seq 数字游标。"""
     if not raw:
         return 0
     text = str(raw).strip()
@@ -399,7 +511,3 @@ async def poll_run_events(
                 return
     finally:
         unsubscribe_run_events(run_id, sub)
-
-
-def _has_more(fetched: list) -> bool:
-    return len(fetched) >= 500

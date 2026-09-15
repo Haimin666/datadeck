@@ -11,45 +11,6 @@
 
 from __future__ import annotations
 
-import uuid
-from datetime import datetime
-
-from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, JSON, String, Text
-
-from server.models import Base
-from server.utils.datetime_utils import utc_now_naive
-
-
-class EvaluationCase(Base):
-    """评测用例：问题 + 期望（工具序列/关键词）。"""
-
-    __tablename__ = "evaluation_cases"
-    __table_args__ = (Index("ix_eval_cases_dataset", "dataset"),)
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    dataset = Column(String(64), nullable=False, default="default")  # 评测集名
-    question = Column(Text, nullable=False)
-    expect_class = Column(String(32), nullable=False)  # metric/schema/data/chat
-    expect_tools = Column(JSON, nullable=False, default=list)  # 期望被调用的工具名（任一）
-    expect_keywords = Column(JSON, nullable=False, default=list)  # 回答必须含的关键词（命中即忠实）
-    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
-
-
-class EvaluationRun(Base):
-    """一次批量评测的结果。"""
-
-    __tablename__ = "evaluation_runs"
-
-    id = Column(String(64), primary_key=True)
-    dataset = Column(String(64), nullable=False, index=True)
-    total = Column(Integer, nullable=False, default=0)
-    passed = Column(Integer, nullable=False, default=0)
-    tool_accuracy = Column(Integer, nullable=True)  # 百分比 0-100
-    faithfulness = Column(Integer, nullable=True)  # 关键词命中百分比
-    details = Column(JSON, nullable=False, default=list)  # 每 case 判定明细
-    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
-
-
 def judge_case(answer_text: str, called_tools: list[str],
                expect_tools: list[str], expect_keywords: list[str]) -> dict:
     """单 case 判定：工具命中 + 关键词命中。"""

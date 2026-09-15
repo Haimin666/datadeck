@@ -1,4 +1,4 @@
-"""SSE 事件契约测试（DEVELOPMENT.md §4 红线：假模型驱动真图，不 mock 翻译层）。
+"""SSE 事件契约测试（假模型驱动真图，不 mock 翻译层）。
 
 断言 Y 侧产物形状：事件信封 {"event": type, "payload": {...}}（前端
 AgentChatComponent.handleSSEEvent 解构契约）、事件序列、seq 游标语义。
@@ -76,6 +76,24 @@ class TestHumanApprovalPayload:
         assert payload["tool_calls"] == []
         assert payload["tool_names"] == []
 
+    def test_uses_request_runtime_descriptor(self):
+        from server.event_translator import _human_approval_payload
+
+        context = type("Context", (), {
+            "runtime_tool_descriptors": {
+                "custom_write": {
+                    "slug": "custom_write",
+                    "package_slug": "package:custom",
+                    "risk_level": "write",
+                }
+            }
+        })()
+        payload = _human_approval_payload({
+            "action_requests": [{"name": "custom_write", "args": {}}],
+        }, context)
+
+        assert payload["tool_calls"][0]["descriptor"]["package_slug"] == "package:custom"
+
 
 class TestExtractAgentState:
     def test_picks_structured_keys_only(self):
@@ -124,7 +142,7 @@ def _create_thread_and_run(client: TestClient, query="你好") -> dict:
         headers=headers,
     )
     assert run_res.status_code == 200, run_res.text
-    return {"token": token, "headers": headers, "thread_id": thread_id, "run": run_res.json()["run"]}
+    return {"token": token, "headers": headers, "thread_id": thread_id, "run": run_res.json()}
 
 
 def _drain_sse(client: TestClient, run_id: str, headers: dict, timeout=10) -> list[dict]:
@@ -204,7 +222,7 @@ class TestSseEndToEnd:
         _drain_sse(app_client, ctx["run"]["id"], ctx["headers"])
         res = app_client.get(f"/api/agent/runs/{ctx['run']['id']}", headers=ctx["headers"])
         assert res.status_code == 200
-        assert res.json()["run"]["status"] == "completed"
+        assert res.json()["status"] == "completed"
 
     def test_replay_after_end_replays_all(self, app_client):
         """终态 run 重连：全量事件可重放（Last-Event-ID=0）。"""

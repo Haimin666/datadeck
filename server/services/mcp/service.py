@@ -10,6 +10,7 @@ Responsibilities:
 import asyncio
 import hashlib
 import json
+import os
 import re
 from collections.abc import Callable
 from typing import Any, cast
@@ -31,10 +32,33 @@ _mcp_lock = asyncio.Lock()
 # 本地仅缓存工具对象。配置始终以数据库为准，每次按 server_slug 现查。
 # cache key 使用 server_slug:config_hash，当配置变化时会自然失效。
 _mcp_tools_cache: dict[str, list[Callable[..., Any]]] = {}
+MCP_TOOLS_CACHE_MAX_ENTRIES = 128
 
 # MCP tools statistics (for reporting enabled/disabled counts)
 _mcp_tools_stats: dict[str, dict[str, int]] = {}
 _USER_CONFIGURABLE_TRANSPORTS = ("sse", "streamable_http")
+
+
+def _mcp_httpx_client_factory(*, headers=None, timeout=None, auth=None):
+    """创建隔离环境代理的 MCP HTTP 客户端。
+
+    MCP 默认直连，避免宿主的 ALL_PROXY/HTTP_PROXY 意外改变内部服务访问；
+    需要代理时必须显式配置 DATADECK_MCP_HTTP_PROXY。模型代理由模型供应商
+    自己的配置控制，两者不能互相继承。
+    """
+    import httpx
+
+    kwargs = {
+        "headers": headers,
+        "timeout": timeout,
+        "trust_env": False,
+    }
+    if auth is not None:
+        kwargs["auth"] = auth
+    proxy = os.getenv("DATADECK_MCP_HTTP_PROXY", "").strip()
+    if proxy:
+        kwargs["proxy"] = proxy
+    return httpx.AsyncClient(**kwargs)
 
 
 def _mcp_discovery_timeout(config: dict[str, Any]) -> float:
@@ -45,20 +69,43 @@ def _mcp_discovery_timeout(config: dict[str, Any]) -> float:
         value = 30.0
     return min(max(value, 1.0), 120.0)
 
-# Default MCP Server configurations (Imported to DB on first run)
-_DEFAULT_MCP_SERVERS = {
-    "mcp-server-chart": {
-        "command": "npx",
-        "args": ["-y", "@antv/mcp-server-chart"],
-        "transport": "stdio",
-        "description": "图表生成工具，支持生成各类图表（柱状图、折线图、饼图等）",
-        "icon": "📊",
-        "tags": ["内置", "图表"],
-    },
-}
+
+def _mcp_error_summary(error: BaseException, *, limit: int = 8) -> str:
+    """提取 MCP 连接失败的嵌套原因，且不把认证信息写入日志。"""
+    messages: list[str] = []
+
+    def collect(current: BaseException) -> None:
+        if len(messages) >= limit:
+            return
+        nested = getattr(current, "exceptions", None)
+        if nested:
+            for item in nested:
+                if isinstance(item, BaseException):
+                    collect(item)
+            return
+        message = str(current).replace("\n", " ").strip()
+        message = re.sub(r"(?i)(authorization|token|api[_-]?key|password|secret)\s*[:=]\s*[^,;]+",
+                         r"\1=<redacted>", message)
+        # MCP 的 streamable HTTP 常把一次性 token 放在 URL path/query；错误文本
+        # 可能由 httpx 原样带回，日志只保留 scheme/host/port。
+        message = re.sub(
+            r"(?i)(https?://[^/\s'\"<>?]+)([/?][^\s'\"<>]*)?",
+            lambda match: f"{match.group(1)}/<redacted>" if match.group(2) else match.group(1),
+            message,
+        )
+        messages.append(f"{type(current).__name__}: {message[:300]}")
+
+    collect(error)
+    if not messages:
+        return f"{type(error).__name__}: {str(error)[:300]}"
+    suffix = " ..." if getattr(error, "exceptions", None) and len(messages) >= limit else ""
+    return "; ".join(messages) + suffix
+
+# No built-in MCP servers. MCP remains user-configurable through the database.
+_DEFAULT_MCP_SERVERS: dict[str, dict[str, Any]] = {}
 _BUILTIN_MCP_SERVER_SLUGS = tuple(_DEFAULT_MCP_SERVERS)
 
-_RETIRED_BUILTIN_MCP_SERVER_SLUGS = ("sequentialthinking",)
+_RETIRED_BUILTIN_MCP_SERVER_SLUGS = ("sequentialthinking", "mcp-server-chart")
 
 _SYNCED_MCP_FIELDS = (
     "description",
@@ -192,8 +239,14 @@ async def get_mcp_client(
 ) -> MultiServerMCPClient | None:
     """Initializes an MCP client with the given server configurations."""
     try:
-        client = MultiServerMCPClient(server_configs)  # pyright: ignore[reportArgumentType]
-        logger.info(f"Initialized MCP client with servers: {list(server_configs.keys())}")
+        normalized_configs = {}
+        for name, config in (server_configs or {}).items():
+            normalized = dict(config)
+            if normalized.get("transport") in {"sse", "streamable_http", "streamable-http", "http"}:
+                normalized.setdefault("httpx_client_factory", _mcp_httpx_client_factory)
+            normalized_configs[name] = normalized
+        client = MultiServerMCPClient(normalized_configs)  # pyright: ignore[reportArgumentType]
+        logger.info(f"Initialized MCP client with servers: {list(normalized_configs.keys())}")
         return client
     except Exception as e:
         logger.error("Failed to initialize MCP client: %s", e)
@@ -333,25 +386,33 @@ async def get_mcp_tools(
                     for stale_key in stale_keys:
                         _mcp_tools_cache.pop(stale_key, None)
                     _mcp_tools_cache[cache_key] = all_processed_tools
-
-                global_config_disabled = server_config.get("disabled_tools") or []
-                enabled_count = len([t for t in all_processed_tools if t.name not in global_config_disabled])
-                _mcp_tools_stats[server_slug] = {
-                    "total": len(all_processed_tools),
-                    "enabled": enabled_count,
-                    "disabled": len(all_processed_tools) - enabled_count,
-                }
+                    while len(_mcp_tools_cache) > MCP_TOOLS_CACHE_MAX_ENTRIES:
+                        _mcp_tools_cache.pop(next(iter(_mcp_tools_cache)))
 
                 logger.info(
                     f"Refreshed MCP tools cache for '{server_slug}' with key '{cache_key}': "
                     f"{len(all_processed_tools)} tools loaded."
                 )
 
+            # 管理端 force_refresh 使用 cache=False，也必须更新发现统计；否则
+            # “连接成功但工具为空”无法判断是确实没有工具还是发现失败。
+            global_config_disabled = server_config.get("disabled_tools") or []
+            enabled_count = len([t for t in all_processed_tools if t.name not in global_config_disabled])
+            _mcp_tools_stats[server_slug] = {
+                "total": len(all_processed_tools),
+                "enabled": enabled_count,
+                "disabled": len(all_processed_tools) - enabled_count,
+            }
+
         except ExceptionGroup as e:
-            logger.warning(f"MCP server '{server_slug}' failed with group error: {e}")
+            logger.warning(
+                f"MCP server '{server_slug}' tool discovery failed: {_mcp_error_summary(e)}"
+            )
             return []
         except Exception as e:
-            logger.exception(f"Failed to load tools from MCP server '{server_slug}': {e}")
+            logger.warning(
+                f"MCP server '{server_slug}' tool discovery failed: {_mcp_error_summary(e)}"
+            )
             return []
 
     # 3. Filtering (Apply to Return Value Only)
@@ -361,9 +422,9 @@ async def get_mcp_tools(
             f"Returning {len(filtered_tools)}/{len(all_processed_tools)} tools for '{server_slug}' "
             f"(filtered {len(disabled_tools)} by argument)"
         )
-        return filtered_tools
+        return list(filtered_tools)
 
-    return all_processed_tools
+    return list(all_processed_tools)
 
 
 async def get_tools_from_all_servers() -> list[Callable[..., Any]]:
@@ -378,14 +439,12 @@ async def get_tools_from_all_servers() -> list[Callable[..., Any]]:
 
 def clear_mcp_cache() -> None:
     """Clear the MCP tools cache (useful for testing)."""
-    global _mcp_tools_cache, _mcp_tools_stats
-    _mcp_tools_cache = {}
-    _mcp_tools_stats = {}
+    _mcp_tools_cache.clear()
+    _mcp_tools_stats.clear()
 
 
 def clear_mcp_server_tools_cache(server_slug: str) -> None:
     """Clear the tools cache for a specific MCP server."""
-    global _mcp_tools_cache, _mcp_tools_stats
     server_prefix = f"{server_slug}:"
     stale_keys = [key for key in _mcp_tools_cache if key.startswith(server_prefix)]
     for stale_key in stale_keys:

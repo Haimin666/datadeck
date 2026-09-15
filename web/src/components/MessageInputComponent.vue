@@ -12,8 +12,9 @@
       <slot name="top"></slot>
     </div>
 
-    <div class="expand-options" v-if="hasOptionsLeft">
+    <div class="expand-options" v-if="hasOptionsLeft || $slots['actions-left']">
       <a-dropdown
+        v-if="hasOptionsLeft"
         v-model:open="optionsExpanded"
         :trigger="['click']"
         placement="topLeft"
@@ -22,7 +23,7 @@
         <template #overlay>
           <div ref="optionsPanelRef" class="options-dropdown-content">
             <slot name="options-left">
-              <div class="no-options">没有配置 options</div>
+              <div class="no-options">没有可添加的内容</div>
             </slot>
           </div>
         </template>
@@ -121,41 +122,6 @@
               'resource-item',
               { active: isItemSelected('knowledge', index) }
             ]"
-            @click="insertMention(item)"
-          >
-            <div class="resource-name">
-              <span
-                v-for="(part, pIdx) in splitTextByQuery(item.label, mentionQuery)"
-                :key="pIdx"
-                :class="{ 'query-match': part.isMatch }"
-                >{{ part.text }}</span
-              >
-            </div>
-            <div
-              v-if="getMentionDescription(item.description)"
-              class="resource-description"
-              :title="getMentionDescription(item.description)"
-            >
-              <span
-                v-for="(part, pIdx) in splitTextByQuery(
-                  getMentionDescription(item.description),
-                  mentionQuery
-                )"
-                :key="pIdx"
-                :class="{ 'query-match': part.isMatch }"
-                >{{ part.text }}</span
-              >
-            </div>
-          </div>
-        </div>
-
-        <!-- MCP 列表 -->
-        <div v-if="mentionItems.mcps.length > 0" class="mention-group">
-          <div class="mention-group-title">MCP</div>
-          <div
-            v-for="(item, index) in mentionItems.mcps"
-            :key="'mcp-' + item.value"
-            :class="['mention-item', 'resource-item', { active: isItemSelected('mcp', index) }]"
             @click="insertMention(item)"
           >
             <div class="resource-name">
@@ -785,7 +751,7 @@ const updateMentionItems = (query = '') => {
   }
 
   if (!props.mention) {
-    mentionItems.value = { files: [], knowledgeBases: [], mcps: [], skills: [], subagents: [] }
+    mentionItems.value = { files: [], knowledgeBases: [], skills: [], subagents: [] }
     return
   }
 
@@ -827,7 +793,6 @@ const updateMentionItems = (query = '') => {
 
   const {
     knowledgeBases: knowledgeItems,
-    mcps: mcpItems,
     skills: skillItems,
     subagents: subagentItems
   } = mentionResourceItems.value
@@ -836,7 +801,6 @@ const updateMentionItems = (query = '') => {
   mentionItems.value = {
     files: filteredLocalFiles,
     knowledgeBases: filterItems(knowledgeItems),
-    mcps: filterItems(mcpItems),
     skills: filterItems(skillItems),
     subagents: filterItems(subagentItems)
   }
@@ -911,19 +875,16 @@ const isItemSelected = (type, index) => {
 
   const filesLen = mentionItems.value.files.length
   const kbLen = mentionItems.value.knowledgeBases.length
-  const mcpLen = mentionItems.value.mcps.length
   const skillsLen = mentionItems.value.skills.length
 
   if (type === 'file') {
     return mentionSelectedIndex.value === index
   } else if (type === 'knowledge') {
     return mentionSelectedIndex.value === filesLen + index
-  } else if (type === 'mcp') {
-    return mentionSelectedIndex.value === filesLen + kbLen + index
   } else if (type === 'skill') {
-    return mentionSelectedIndex.value === filesLen + kbLen + mcpLen + index
+    return mentionSelectedIndex.value === filesLen + kbLen + index
   } else {
-    return mentionSelectedIndex.value === filesLen + kbLen + mcpLen + skillsLen + index
+    return mentionSelectedIndex.value === filesLen + kbLen + skillsLen + index
   }
 }
 
@@ -938,7 +899,6 @@ const hasAnyItems = computed(() => {
     showFileSearchPrompt.value ||
     items.files.length > 0 ||
     items.knowledgeBases.length > 0 ||
-    items.mcps.length > 0 ||
     items.skills.length > 0 ||
     items.subagents.length > 0
   )
@@ -1004,7 +964,6 @@ const handleMentionNavigation = (e) => {
   const allItems = [
     ...mentionItems.value.files,
     ...mentionItems.value.knowledgeBases,
-    ...mentionItems.value.mcps,
     ...mentionItems.value.skills,
     ...mentionItems.value.subagents
   ]
@@ -1109,6 +1068,12 @@ const handleMentionDeletion = (e) => {
 
 // 处理键盘事件
 const handleKeyPress = (e) => {
+  // 中文输入法确认候选词时也会产生 Enter keydown；此时不能把该事件
+  // 转发给父组件，否则候选词确认会同时触发发送消息。
+  if (e.isComposing || e.keyCode === 229 || isComposing.value) {
+    return
+  }
+
   // @ 提及键盘导航
   if (mentionPopupVisible.value) {
     if (['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
@@ -1232,7 +1197,7 @@ const handleSendOrStop = () => {
 // @ 提及功能状态
 const mentionPopupVisible = ref(false)
 const mentionQuery = ref('')
-const mentionItems = ref({ files: [], knowledgeBases: [], mcps: [], skills: [], subagents: [] })
+const mentionItems = ref({ files: [], knowledgeBases: [], skills: [], subagents: [] })
 const mentionSelectedIndex = ref(0)
 const searchRequestId = ref(0)
 const isComposing = ref(false)

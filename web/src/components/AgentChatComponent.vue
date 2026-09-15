@@ -130,7 +130,25 @@
             </template>
 
             <!-- 生成中的加载状态 - 增强条件支持主聊天和resume流程 -->
-            <div class="generating-status" v-if="isReplyLoading && conversations.length > 0">
+            <div
+              class="run-connection-status"
+              v-if="isStreaming && currentThreadState?.runConnectionStatus !== 'connected'"
+            >
+              <span v-if="currentThreadState?.runConnectionStatus === 'reconnecting'">
+                对话连接中断，任务仍在后台运行，正在重连（第{{ currentThreadState.runReconnectAttempt }}次）
+              </span>
+              <span v-else-if="currentThreadState?.runConnectionStatus === 'disconnected'">
+                对话连接已断开，正在确认任务状态
+              </span>
+              <span v-else>正在连接任务...</span>
+              <button type="button" @click="handleRetryRunStream">重新连接</button>
+            </div>
+            <div
+              v-if="isProcessing || isReplyLoading"
+              class="generating-status"
+              aria-live="polite"
+              aria-label="Agent 正在运行"
+            >
               <div class="generating-indicator">
                 <div class="loading-dots">
                   <div></div>
@@ -142,6 +160,10 @@
                   replyElapsedLabel
                 }}</span>
               </div>
+            </div>
+            <div v-if="currentRunFailureMessage" class="run-failure-status" role="alert">
+              <strong>Agent 执行失败</strong>
+              <span>{{ currentRunFailureMessage }}</span>
             </div>
           </div>
           <div
@@ -236,7 +258,7 @@
                   :kind="approvalState.kind"
                   :action-requests="approvalState.actionRequests"
                   @submit="handleQuestionSubmit"
-                  @cancel="handleQuestionCancel"
+                  @cancel="handleApprovalCancel"
                 />
 
                 <div
@@ -319,7 +341,7 @@
                 @added="handleTmpAttachmentsAdded"
               />
 
-              <div class="bottom-actions" v-if="conversations.length > 0">
+              <div class="bottom-actions" v-if="currentChatId">
                 <p class="note">当前智能体：{{ currentThreadAgentName }}；请注意辨别内容的可靠性</p>
               </div>
             </div>
@@ -361,6 +383,44 @@
             </div>
 
             <div class="state-panel-body">
+              <section
+                v-if="currentTraceEvents.length"
+                class="state-section trace-section"
+                :class="{ 'is-collapsed': !isStateSectionExpanded('trace') }"
+              >
+                <button
+                  type="button"
+                  class="state-section-header"
+                  :aria-expanded="isStateSectionExpanded('trace')"
+                  aria-controls="state-section-trace"
+                  @click="toggleStateSection('trace')"
+                >
+                  <span class="state-section-label">
+                    <Activity :size="14" class="trace-section-icon" />
+                    <span class="state-section-title">运行追踪</span>
+                    <ChevronDown
+                      :size="15"
+                      class="state-section-chevron"
+                      :class="{ 'is-collapsed': !isStateSectionExpanded('trace') }"
+                    />
+                  </span>
+                  <span class="state-section-meta">{{ currentTraceEvents.length }}</span>
+                </button>
+                <div
+                  class="state-collapse-panel"
+                  :class="{ 'is-expanded': isStateSectionExpanded('trace') }"
+                >
+                  <div class="state-collapse-inner">
+                    <div id="state-section-trace" class="state-section-content trace-list">
+                      <div v-for="item in currentTraceEvents" :key="item.id" class="trace-item">
+                        <span class="trace-dot" :class="`is-${item.event}`"></span>
+                        <span class="trace-item-label">{{ item.label }}</span>
+                        <span v-if="item.detail" class="trace-item-detail" :title="item.detail">{{ item.detail }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
               <section
                 v-if="currentTokenUsage"
                 class="state-section token-usage-section"
@@ -806,6 +866,7 @@ import {
 import { message } from 'ant-design-vue'
 import {
   Bug,
+  Activity,
   ChevronDown,
   CornerDownRight,
   Folders,
@@ -899,7 +960,14 @@ const configStore = useConfigStore()
 const infoStore = useInfoStore()
 const userStore = useUserStore()
 const messageDebugEnabled = computed(() => infoStore.debugMode && userStore.isSuperAdmin)
-const { agents, selectedAgentId, agentConfig, configurableItems, availableKnowledgeBases } =
+const {
+  agents,
+  selectedAgentId,
+  agentConfig,
+  configurableItems,
+  availableKnowledgeBases,
+  availableSkills
+} =
   storeToRefs(agentStore)
 const { threads, currentThreadId, currentThread, threadCreationInFlight } =
   storeToRefs(chatThreadsStore)
@@ -1389,9 +1457,9 @@ const currentThreadAgentName = computed(() => {
 })
 // 检查当前智能体是否支持文件上传
 const supportsFileUpload = computed(() => {
-  if (!currentAgent.value) return false
-  const capabilities = currentAgent.value.capabilities || []
-  return capabilities.includes('file_upload')
+  // 附件是对话输入能力，不应依赖某个 Agent 的静态 capabilities 声明。
+  // 新建/通用/DataAgent 都通过同一附件接口处理，避免“有工作区但 + 号不能上传”。
+  return Boolean(currentAgent.value)
 })
 
 const supportsFiles = computed(() => {
@@ -1847,7 +1915,9 @@ const { mentionConfig } = useAgentMentionConfig({
   currentAgentState,
   currentThreadAttachments,
   configurableItems,
-  agentConfig
+  agentConfig,
+  availableKnowledgeBases,
+  availableSkills
 })
 
 const currentThreadMessages = computed(() => threadMessages.value[currentChatId.value] || [])
@@ -2317,6 +2387,8 @@ const replyLoadingText = computed(() => {
   if (hasQueuedRequests.value) return `排队中（${queuedRequestCount.value} 条）...`
   return '正在生成回复...'
 })
+const currentRunFailureMessage = computed(() => currentThreadState.value?.runFailureMessage || '')
+const currentTraceEvents = computed(() => currentThreadState.value?.traceEvents || [])
 const replyElapsedSeconds = ref(0)
 let replyElapsedTimer = null
 let replyStartedAt = null
@@ -2421,6 +2493,10 @@ const insertOptimisticHumanMessage = (
   if (!threadState || !requestId) return
   threadState.pendingRequestId = requestId
   threadState.replyLoadingVisible = false
+  threadState.runFailureMessage = ''
+  threadState.traceEvents = []
+  threadState.runtimeSnapshot = null
+  threadState.runtimeDiagnostics = []
   threadState.onGoingConv.msgChunks[requestId] = [
     buildOptimisticHumanMessage({ requestId, text, imageContent, attachments })
   ]
@@ -2955,7 +3031,12 @@ const { handleStreamChunk } = useAgentStreamHandler({
   supportsFiles,
   streamSmoother
 })
-const { startRunStream, resumeActiveRunForThread, stopRunStreamSubscription } = useAgentRunStream({
+const {
+  startRunStream,
+  resumeActiveRunForThread,
+  stopRunStreamSubscription,
+  retryRunStream
+} = useAgentRunStream({
   getThreadState,
   currentAgentId,
   handleStreamChunk,
@@ -3000,6 +3081,12 @@ const {
   startRunStream,
   onStreamError: () => {}
 })
+
+const handleRetryRunStream = async () => {
+  const threadId = currentChatId.value
+  if (!threadId) return
+  await retryRunStream(threadId)
+}
 
 const handleCancelQueuedRequest = async (requestId) => {
   const threadId = currentChatId.value
@@ -3175,6 +3262,14 @@ const selectThreadFromRoute = async (threadId) => {
     await loadChatsList()
   }
 
+  if (!threads.value.find((thread) => thread.id === threadId)) {
+    try {
+      await chatThreadsStore.loadThread(threadId)
+    } catch (error) {
+      if (error?.status !== 404) handleChatError(error, 'load')
+    }
+  }
+
   const targetThread = threads.value.find((thread) => thread.id === threadId)
   if (!targetThread) {
     return false
@@ -3237,23 +3332,8 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
   if ((threadMessages.value[threadId] || []).length === 0) {
     const autoTitle = text.replace(/\s+/g, ' ').trim().slice(0, 2000)
     if (autoTitle) {
-      void (async () => {
-        try {
-          const generatedTitle = await agentApi.generateTitle(
-            autoTitle,
-            configStore.config?.fast_model
-          )
-          if (generatedTitle) {
-            const finalTitle = generatedTitle.slice(0, 30).replace(/\s+/g, ' ').trim()
-            if (finalTitle) {
-              void chatThreadsStore.updateThread(threadId, finalTitle).catch(() => {})
-            }
-          }
-        } catch (e) {
-          console.error('Title generation failed:', e)
-          void chatThreadsStore.updateThread(threadId, autoTitle.slice(0, 30)).catch(() => {})
-        }
-      })()
+      const finalTitle = autoTitle.slice(0, 30).replace(/\s+/g, ' ').trim()
+      void chatThreadsStore.updateThread(threadId, finalTitle).catch(() => {})
     }
   }
 
@@ -3398,10 +3478,16 @@ const handleApprovalWithStream = async (answer) => {
     return
   }
 
+  if (threadState.approvalResumeInFlight) return
+  threadState.approvalResumeInFlight = true
   const pendingInterrupt = threadState.pendingInterrupt
+  const resumeAfterSeq = threadState.runLastSeq || '0-0'
+  const threadAgentId =
+    threads.value.find((thread) => thread.id === threadId)?.agent_id || currentAgentId.value
 
   try {
     invalidateAgentStateRequest(threadId)
+    stopRunStreamSubscription(threadId)
     hideApprovalState()
     threadState.pendingInterrupt = null
     threadState.isStreaming = true
@@ -3409,7 +3495,7 @@ const handleApprovalWithStream = async (answer) => {
     const requestId = createClientRequestId()
     const runResp = await agentApi.createAgentRun({
       query: null,
-      agent_slug: currentAgentId.value,
+      agent_slug: threadAgentId,
       thread_id: threadId,
       meta: { request_id: requestId },
       resume: interruptedRunId,
@@ -3421,7 +3507,7 @@ const handleApprovalWithStream = async (answer) => {
     if (!runId) {
       throw new Error('创建 resume run 失败：缺少 run_id')
     }
-    await startRunStream(threadId, runId, '0-0')
+    await startRunStream(threadId, runId, resumeAfterSeq)
   } catch (error) {
     if (pendingInterrupt) {
       threadState.pendingInterrupt = pendingInterrupt
@@ -3430,6 +3516,8 @@ const handleApprovalWithStream = async (answer) => {
     threadState.isStreaming = false
     threadState.replyLoadingVisible = false
     handleChatError(error, 'resume')
+  } finally {
+    threadState.approvalResumeInFlight = false
   }
 }
 
@@ -3437,8 +3525,33 @@ const handleQuestionSubmit = (answer) => {
   handleApprovalWithStream(answer)
 }
 
-const handleQuestionCancel = () => {
-  handleApprovalWithStream('reject')
+const handleApprovalCancel = async () => {
+  const threadId = approvalState.threadId
+  const runId = approvalState.interruptedRunId
+  const threadState = threadId ? getThreadState(threadId) : null
+
+  if (!runId) {
+    if (threadState) {
+      threadState.pendingInterrupt = null
+      threadState.isStreaming = false
+      threadState.replyLoadingVisible = false
+    }
+    hideApprovalState()
+    return
+  }
+
+  try {
+    await agentApi.cancelAgentRun(runId)
+    if (threadState) {
+      threadState.pendingInterrupt = null
+      threadState.isStreaming = false
+      threadState.replyLoadingVisible = false
+    }
+    hideApprovalState()
+    message.info('已取消当前等待处理的任务')
+  } catch (error) {
+    handleChatError(error, 'cancel')
+  }
 }
 
 const buildExportPayload = () => {
@@ -3639,14 +3752,6 @@ const loadChatsList = async () => {
   try {
     await fetchThreads(agentId)
     if (props.singleMode && currentAgentId.value !== agentId) return
-
-    // 如果当前线程不在线程列表中，清空当前线程
-    if (
-      chatState.currentThreadId &&
-      !threads.value.find((t) => t.id === chatState.currentThreadId)
-    ) {
-      setCurrentThreadId(null)
-    }
 
     // singleMode 保持旧行为：自动选择首个可用对话
     if (props.singleMode && threads.value.length > 0 && !chatState.currentThreadId) {
@@ -4480,6 +4585,47 @@ watch(currentChatId, (threadId, oldThreadId) => {
   transition: all 0.2s;
 }
 
+.run-failure-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: min(680px, 92%);
+  margin: 4px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-error-100);
+  border-radius: 8px;
+  background: var(--color-error-50);
+  color: var(--color-error-700);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.run-failure-status strong {
+  font-size: 13px;
+}
+
+.run-connection-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin: 4px 0 8px;
+  color: var(--text-secondary, #64748b);
+  font-size: 12px;
+  background: var(--bg-soft, rgba(148, 163, 184, 0.1));
+  border-radius: 8px;
+}
+
+.run-connection-status button {
+  padding: 2px 8px;
+  color: var(--main-color);
+  font-size: 12px;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
 .generating-indicator {
   display: flex;
   align-items: center;
@@ -4733,6 +4879,59 @@ watch(currentChatId, (threadId, oldThreadId) => {
   flex-shrink: 0;
   font-size: 12px;
   color: var(--gray-500);
+}
+
+.trace-section-icon {
+  color: var(--main-600);
+}
+
+.trace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 4px 0 2px 2px;
+  border-left: 1px solid var(--gray-150);
+}
+
+.trace-item {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-left: 9px;
+  color: var(--gray-700);
+  font-size: 12px;
+}
+
+.trace-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--main-500);
+  box-shadow: 0 0 0 3px var(--main-20);
+}
+
+.trace-dot.is-error {
+  background: var(--color-error-500);
+  box-shadow: 0 0 0 3px var(--color-error-50);
+}
+
+.trace-dot.is-finished {
+  background: var(--color-success-500, #52c41a);
+  box-shadow: 0 0 0 3px var(--color-success-50, #f6ffed);
+}
+
+.trace-item-label {
+  flex-shrink: 0;
+}
+
+.trace-item-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--gray-500);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .state-panel-body {

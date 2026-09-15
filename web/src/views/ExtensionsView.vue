@@ -72,7 +72,6 @@ const replaceTabQuery = (tab) => {
 
 const isDetailPage = computed(() => {
   return (
-    route.path.startsWith('/extensions/knowledgebase/') ||
     route.path.startsWith('/extensions/mcp/') ||
     route.path.startsWith('/extensions/skill/')
   )

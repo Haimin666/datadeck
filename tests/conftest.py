@@ -1,16 +1,20 @@
 """后端测试共享 fixture：PG 测试库 + 假模型 + app client。
 
-测试库红线（DEVELOPMENT.md §4）：必须 datadeck_test。
+测试库红线：必须使用 datadeck_test。
 关键：环境变量须在 import server.* 之前设置（server.db 的 engine 是模块级创建）；
 表由 lifespan 在 TestClient 的 portal loop 内创建（asyncpg 连接绑 loop，不可跨用）。
 """
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+import asyncio
 
 TEST_DATABASE_URL = "postgresql+asyncpg://localhost:5432/datadeck_test"
 
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+os.environ["DATADECK_TESTING"] = "1"
 assert "datadeck_test" in os.environ["DATABASE_URL"], "测试库防线：必须 datadeck_test"
 
 # ── 测试数据根防线：落到可写临时目录，避免污染/依赖真实数据根 ──────────
@@ -110,6 +114,16 @@ def _drop_test_schema() -> None:
         )
         conn.execute("DROP SCHEMA IF EXISTS public CASCADE")
         conn.execute("CREATE SCHEMA public")
+    # 应用启动不再 create_all；测试也必须走和 Docker 一样的 Alembic 路径。
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=os.environ.copy(),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
 
 @pytest.fixture
@@ -142,17 +156,22 @@ def app_client(monkeypatch):
 
     shared_checkpointer = MemoryCheckpointerProvider()
 
-    async def fake_get_agent():
+    async def fake_get_agent(*_args, **_kwargs):
         return ChatbotAgent(
             model_provider=EnvModelProvider(),
             checkpointer_provider=shared_checkpointer,
         )
 
     monkeypatch.setattr(ap, "get_chatbot_agent", fake_get_agent)
-    monkeypatch.setattr(rs, "get_chatbot_agent", fake_get_agent)
+    monkeypatch.setattr(rs, "get_agent", fake_get_agent)
     monkeypatch.setattr(ap, "_agent", None)
 
     _drop_test_schema()
     with TestClient(server_main.app) as client:
         yield client
+    # asyncpg connections are bound to the TestClient portal loop.  Dispose the
+    # module-level SQLAlchemy pool before the next test creates another loop;
+    # otherwise the next lifespan can reuse a connection tied to a closed loop.
+    from server.db import engine
+    asyncio.run(engine.dispose())
     _drop_test_schema()

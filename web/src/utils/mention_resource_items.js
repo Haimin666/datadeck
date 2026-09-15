@@ -13,24 +13,16 @@ const toResourceItem = (type, { value, label, extra = {} } = {}) => {
 }
 
 export const buildMentionResourceItems = (mention = {}) => {
-  const { knowledgeBases = [], mcps = [], skills = [], subagents = [] } = mention
+  const { knowledgeBases = [], skills = [], subagents = [] } = mention
 
   return {
     knowledgeBases: knowledgeBases
       .map((kb) =>
         toResourceItem('knowledge', {
-          value: kb.name,
+          // token 必须携带稳定的知识库 ID；名称可能重复且不能用于运行时授权。
+          value: kb.kb_id || kb.id || kb.slug,
           label: kb.name,
           extra: { description: kb.description || '', resourceId: kb.kb_id }
-        })
-      )
-      .filter(Boolean),
-    mcps: mcps
-      .map((m) =>
-        toResourceItem('mcp', {
-          value: m.slug || m.value || m.id || m.name,
-          label: m.name || m.label,
-          extra: { description: m.description || '' }
         })
       )
       .filter(Boolean),
@@ -46,7 +38,7 @@ export const buildMentionResourceItems = (mention = {}) => {
     subagents: subagents
       .map((s) =>
         toResourceItem('subagent', {
-          value: s.id || s.value || s.slug || s.name,
+          value: s.slug || s.id || s.value || s.name,
           label: s.name || s.label,
           extra: { description: s.description || '' }
         })

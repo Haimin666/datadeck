@@ -84,7 +84,7 @@
                 <!-- 多选 / 工具列表 (统一处理) -->
                 <div v-else-if="isListConfig(key, value)" class="list-config-container">
                   <!-- Case 1: <= 5 options, inline list -->
-                  <div v-if="getConfigOptions(value).length <= 5" class="multi-select-cards">
+                  <div v-if="getConfigOptions(value).length <= 5 && !isToolResourceKind(value.kind)" class="multi-select-cards">
                     <div class="multi-select-label">
                       <span
                         >已选择 {{ getSelectedCount(key) }} 项 | 共
@@ -136,12 +136,19 @@
                         :class="{
                           selected: isOptionSelected(key, getOptionValue(option)),
                           unselected: !isOptionSelected(key, getOptionValue(option)),
-                          readonly: isReadOnlyConfig
+                          readonly: isReadOnlyConfig,
+                          fixed: isOptionFixed(option)
                         }"
                         @click="!isReadOnlyConfig && toggleOption(key, getOptionValue(option))"
                       >
                         <div class="option-content">
-                          <span class="option-text">{{ getOptionLabel(option) }}</span>
+                          <span class="option-text">
+                            <small v-if="isToolsKind(value.kind) && getOptionGroupLabel(option)">
+                              {{ getOptionGroupLabel(option) }} ·
+                            </small>
+                            {{ getOptionLabel(option) }}
+                            <small v-if="isOptionFixed(option)" class="fixed-option-label">内置固定</small>
+                          </span>
                           <div class="option-indicator">
                             <Check
                               v-if="isOptionSelected(key, getOptionValue(option))"
@@ -235,18 +242,6 @@
                   :placeholder="getPlaceholder(key, value)"
                   class="config-input"
                 />
-                <div
-                  v-if="shouldShowKnowledgeSkillWarning(key)"
-                  class="knowledge-skill-warning"
-                  role="status"
-                  aria-live="polite"
-                >
-                  <AlertTriangle :size="14" />
-                  <span>
-                    已启用知识库，但未选择 knowledge-base Skill。Agent
-                    可能无法调用知识库检索、打开文档等工具。
-                  </span>
-                </div>
               </a-form-item>
             </template>
           </a-form>
@@ -274,7 +269,20 @@
               <Search :size="16" class="search-icon" />
             </template>
           </a-input>
+          <a-select
+            v-if="isToolsKind(currentConfigKind)"
+            v-model:value="selectionCategory"
+            class="selection-category"
+            size="small"
+          >
+            <a-select-option value="">全部分类</a-select-option>
+            <a-select-option v-for="group in currentOptionGroups" :key="group" :value="group">
+              {{ getOptionGroupLabel({ group }) || group }}
+            </a-select-option>
+          </a-select>
           <template v-if="!isReadOnlyConfig && isToolsKind(currentConfigKind)">
+            <a-button type="text" size="small" @click="selectAllFiltered" class="inline-action-btn">全选</a-button>
+            <a-button type="text" size="small" @click="clearFilteredSelection" class="inline-action-btn">清空</a-button>
             <a-button
               type="text"
               size="small"
@@ -303,12 +311,18 @@
             v-for="option in filteredOptions"
             :key="getOptionValue(option)"
             class="selection-item"
-            :class="{ selected: tempSelectedValues.includes(getOptionValue(option)) }"
+            :class="{ selected: tempSelectedValues.includes(getOptionValue(option)), fixed: isOptionFixed(option) }"
             @click="!isReadOnlyConfig && toggleModalSelection(getOptionValue(option))"
           >
             <div class="selection-item-content">
               <div class="selection-item-header">
-                <span class="selection-item-name">{{ getOptionLabel(option) }}</span>
+                <span class="selection-item-name">
+                  <small v-if="isToolsKind(configurableItems[currentConfigKey]?.kind) && getOptionGroupLabel(option)">
+                    {{ getOptionGroupLabel(option) }} ·
+                  </small>
+                  {{ getOptionLabel(option) }}
+                  <small v-if="isOptionFixed(option)" class="fixed-option-label">内置固定</small>
+                </span>
 
                 <div class="selection-item-indicator">
                   <Check v-if="tempSelectedValues.includes(getOptionValue(option))" :size="16" />
@@ -387,7 +401,7 @@
 import { ref, computed } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRouter } from 'vue-router'
-import { AlertTriangle, Check, Plus, Search, RotateCw, RotateCcw, Settings } from '@lucide/vue'
+import { Check, Plus, Search, RotateCw, RotateCcw, Settings } from '@lucide/vue'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import { useAgentStore } from '@/stores/agent'
 import {
@@ -408,6 +422,10 @@ const props = defineProps({
   showSegmented: {
     type: Boolean,
     default: true
+  },
+  allowSubagents: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -423,6 +441,7 @@ const selectionModalOpen = ref(false)
 const currentConfigKey = ref(null)
 const tempSelectedValues = ref([])
 const selectionSearchText = ref('')
+const selectionCategory = ref('')
 const systemPromptModalOpen = ref(false)
 const currentSystemPromptKey = ref(null)
 const systemPromptDraft = ref('')
@@ -434,7 +453,6 @@ const segmentOptions = [
 ]
 const activeSegment = computed(() => (props.showSegmented ? currentSegment.value : props.segment))
 const isToolResourceKind = (kind) => isDefaultAllAgentResourceKind(kind)
-const KNOWLEDGE_BASE_SKILL_SLUG = 'knowledge-base'
 
 const isEmptyConfig = computed(() => {
   return !selectedAgentId.value || Object.keys(configurableItems.value).length === 0
@@ -452,7 +470,7 @@ const segmentConfigKeys = computed(() => {
     }),
     tools: keys.filter((key) => {
       const meta = configurableItems.value[key]?.kind
-      return isToolResourceKind(meta)
+      return isToolResourceKind(meta) && meta !== 'subagents'
     }),
     other: keys.filter((key) => {
       const meta = configurableItems.value[key]?.kind
@@ -506,9 +524,6 @@ const navigateToConfigPage = (kind) => {
       case 'tools':
         router.push({ path: '/extensions', query: { tab: 'tools' } })
         break
-      case 'mcps':
-        router.push({ path: '/extensions', query: { tab: 'mcp' } })
-        break
       case 'skills':
         router.push({ path: '/extensions', query: { tab: 'skills' } })
         break
@@ -523,24 +538,6 @@ const isListConfig = (key, value) => {
   const isDefaultAllKind = isDefaultAllAgentResourceKind(value?.kind)
   const isList = value?.type === 'list'
   return isDefaultAllKind || isList || key === 'skills' || key === 'subagents'
-}
-
-const isDefaultEnabledResourceValue = (value) => value === null || value === undefined
-
-const isResourceEnabled = (value) => {
-  if (Array.isArray(value)) return value.length > 0
-  return isDefaultEnabledResourceValue(value)
-}
-
-const isKnowledgeBaseSkillEnabled = computed(() => {
-  const skills = agentConfig.value?.skills
-  if (Array.isArray(skills)) return skills.includes(KNOWLEDGE_BASE_SKILL_SLUG)
-  return isDefaultEnabledResourceValue(skills)
-})
-
-const shouldShowKnowledgeSkillWarning = (key) => {
-  if (key !== 'knowledges') return false
-  return isResourceEnabled(agentConfig.value?.knowledges) && !isKnowledgeBaseSkillEnabled.value
 }
 
 const currentConfigKind = computed(() => {
@@ -586,14 +583,26 @@ const filteredOptions = computed(() => {
   const configItem = configurableItems.value[key]
   const options = getConfigOptions(configItem)
 
-  if (!selectionSearchText.value) return options
+  const visibleOptions = selectionCategory.value
+    ? options.filter((opt) => String(opt?.group || '') === selectionCategory.value)
+    : options
+  if (!selectionSearchText.value) return visibleOptions
 
   const search = selectionSearchText.value.toLowerCase()
-  return options.filter((opt) => {
+  return visibleOptions.filter((opt) => {
     const label = String(getOptionLabel(opt)).toLowerCase()
     const desc = String(getOptionDescription(opt) || '').toLowerCase()
     return label.includes(search) || desc.includes(search)
   })
+})
+
+const currentOptionGroups = computed(() => {
+  if (!currentConfigKey.value) return []
+  return [...new Set(
+    getConfigOptions(configurableItems.value[currentConfigKey.value])
+      .map((option) => option?.group)
+      .filter(Boolean)
+  )]
 })
 
 // 方法
@@ -613,6 +622,13 @@ const getConfigLabel = (key, value) => {
   return key
 }
 
+const getOptionGroupLabel = (option) => {
+  const labels = { buildin: '内置工具', filesystem: '文件工具', data: '数据工具', platform: '平台能力', mcp: 'MCP' }
+  return labels[option?.group] || option?.group || ''
+}
+
+const isOptionFixed = (option) => Boolean(option?.fixed)
+
 const getPlaceholder = (_key, value) => {
   return `（默认: ${value.default}）`
 }
@@ -629,17 +645,23 @@ const handleModelChange = (key, spec) => {
 const ensureArray = (key) => {
   const config = agentConfig.value || {}
   const configItem = configurableItems.value[key]
+  const fixedValues = getConfigOptions(configItem)
+    .filter(isOptionFixed)
+    .map(getOptionValue)
   if (config[key] === null && isDefaultAllAgentResourceKind(configItem?.kind)) {
     return getConfigOptions(configItem).map((option) => getOptionValue(option))
   }
   if (!config[key] || !Array.isArray(config[key])) {
-    return []
+    return fixedValues
   }
   const validValues = new Set(
     getConfigOptions(configItem).map((option) => String(getOptionValue(option)))
   )
   if (validValues.size === 0) return config[key]
-  return config[key].filter((value) => validValues.has(String(value)))
+  return [...new Set([
+    ...fixedValues,
+    ...config[key].filter((value) => validValues.has(String(value)))
+  ])]
 }
 
 const isOptionSelected = (key, option) => {
@@ -654,6 +676,9 @@ const getSelectedCount = (key) => {
 
 const toggleOption = (key, option) => {
   if (isReadOnlyConfig.value) return
+  if (getConfigOptions(configurableItems.value[key]).some(
+    (item) => getOptionValue(item) === option && isOptionFixed(item)
+  )) return
   const currentOptions = [...ensureArray(key)]
   const index = currentOptions.indexOf(option)
 
@@ -670,8 +695,11 @@ const toggleOption = (key, option) => {
 
 const clearSelection = (key) => {
   if (isReadOnlyConfig.value) return
+  const fixed = getConfigOptions(configurableItems.value[key])
+    .filter(isOptionFixed)
+    .map(getOptionValue)
   agentStore.updateAgentConfig({
-    [key]: []
+    [key]: fixed
   })
 }
 
@@ -686,11 +714,15 @@ const openSelectionModal = (key) => {
   if (isReadOnlyConfig.value) return
   currentConfigKey.value = key
   tempSelectedValues.value = [...ensureArray(key)]
+  selectionCategory.value = ''
   selectionModalOpen.value = true
 }
 
 const toggleModalSelection = (optionValue) => {
   if (isReadOnlyConfig.value) return
+  if (getConfigOptions(configurableItems.value[currentConfigKey.value]).some(
+    (item) => getOptionValue(item) === optionValue && isOptionFixed(item)
+  )) return
   const index = tempSelectedValues.value.indexOf(optionValue)
   if (index > -1) {
     tempSelectedValues.value.splice(index, 1)
@@ -717,6 +749,20 @@ const closeSelectionModal = () => {
   currentConfigKey.value = null
   tempSelectedValues.value = []
   selectionSearchText.value = ''
+  selectionCategory.value = ''
+}
+
+const selectAllFiltered = () => {
+  if (isReadOnlyConfig.value) return
+  const selected = new Set(tempSelectedValues.value)
+  filteredOptions.value.forEach((option) => selected.add(getOptionValue(option)))
+  tempSelectedValues.value = [...selected]
+}
+
+const clearFilteredSelection = () => {
+  if (isReadOnlyConfig.value) return
+  const visible = new Set(filteredOptions.value.map((option) => getOptionValue(option)))
+  tempSelectedValues.value = tempSelectedValues.value.filter((value) => !visible.has(value))
 }
 
 // 系统提示词弹窗编辑相关方法

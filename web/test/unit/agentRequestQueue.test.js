@@ -78,7 +78,7 @@ test('run_created 立即完成状态交接并订阅新 Run SSE', async () => {
   const calls = []
   const originalStreamRequestEvents = agentApi.streamRequestEvents
   agentApi.streamRequestEvents = async () =>
-    new Response('event: run_created\ndata: {"run_id":"run-2"}\n\n', {
+    new Response('event: run_created\ndata: {"event":"run_created","payload":{"run_id":"run-2"}}\n\n', {
       headers: { 'Content-Type': 'text/event-stream' }
     })
 
@@ -120,7 +120,7 @@ test('run_created 先到达时保留旧 Run 已渲染的内容', async () => {
   const calls = []
   const originalStreamRequestEvents = agentApi.streamRequestEvents
   agentApi.streamRequestEvents = async () =>
-    new Response('event: run_created\ndata: {"run_id":"run-2"}\n\n', {
+    new Response('event: run_created\ndata: {"event":"run_created","payload":{"run_id":"run-2"}}\n\n', {
       headers: { 'Content-Type': 'text/event-stream' }
     })
 
@@ -172,7 +172,7 @@ test('replacement Run SSE 的增量 chunk 会连续进入前端渲染处理', as
   })
 
   agentApi.streamRequestEvents = async () =>
-    new Response('event: run_created\ndata: {"run_id":"run-2"}\n\n', {
+    new Response('event: run_created\ndata: {"event":"run_created","payload":{"run_id":"run-2"}}\n\n', {
       headers: { 'Content-Type': 'text/event-stream' }
     })
   agentApi.streamAgentRunEvents = async () =>

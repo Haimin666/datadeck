@@ -77,6 +77,41 @@ const toolFinishedMessage = (chunk) => {
   return { ...output, type: 'tool', id }
 }
 
+const appendTraceEvent = (threadState, event, chunk = {}) => {
+  if (!threadState) return
+  if (!Array.isArray(threadState.traceEvents)) threadState.traceEvents = []
+  const label = {
+    init: '运行已创建',
+    loading: chunk.stream_event?.type === 'tool_call' ? '调用工具' : '生成回复',
+    agent_state: '更新 Agent 状态',
+    human_approval_required: '等待审批',
+    ask_user_question_required: '等待用户输入',
+    runtime_snapshot: '装配运行资源',
+    runtime_diagnostic: '运行资源诊断',
+    error: '运行失败',
+    finished: '运行完成'
+  }[event]
+  if (!label) return
+  const traceEvent = {
+    id: `${Date.now()}-${threadState.traceEvents.length}`,
+    event,
+    label,
+    detail: chunk.stream_event?.name || chunkMessageText(chunk) || '',
+    at: new Date().toISOString()
+  }
+  const last = threadState.traceEvents[threadState.traceEvents.length - 1]
+  if (last?.event === event && last?.detail === traceEvent.detail && event === 'loading') return
+  threadState.traceEvents.push(traceEvent)
+  if (threadState.traceEvents.length > 80) threadState.traceEvents.splice(0, 20)
+}
+
+const chunkMessageText = (chunk) => {
+  if (typeof chunk?.message === 'string') return chunk.message
+  if (typeof chunk?.msg === 'string') return chunk.msg
+  if (typeof chunk?.message?.message === 'string') return chunk.message.message
+  return ''
+}
+
 export function useAgentStreamHandler({
   getThreadState,
   processApprovalInStream,
@@ -96,6 +131,7 @@ export function useAgentStreamHandler({
     const threadState = getThreadState(threadId)
 
     if (!threadState) return false
+    appendTraceEvent(threadState, status, chunk)
 
     switch (status) {
       case 'init':
@@ -167,6 +203,10 @@ export function useAgentStreamHandler({
 
       case 'error':
         streamSmoother?.flushThread(threadId)
+        threadState.runFailureMessage =
+          typeof chunkMessage === 'string'
+            ? chunkMessage
+            : chunkMessage?.message || chunkMessage?.error_message || 'Agent 执行失败'
         handleChatError({ message: chunkMessage }, 'stream')
         // Stop the loading indicator
         if (threadState) {
@@ -212,6 +252,24 @@ export function useAgentStreamHandler({
             currentAgentId: unref(currentAgentId),
             threadId
           })
+        }
+        return false
+
+      case 'runtime_snapshot':
+        threadState.runtimeSnapshot = chunk.runtime_snapshot || chunk.snapshot || null
+        return false
+
+      case 'runtime_diagnostic':
+        if (chunk.diagnostic && typeof chunk.diagnostic === 'object') {
+          threadState.runtimeDiagnostics = [
+            ...(threadState.runtimeDiagnostics || []),
+            chunk.diagnostic
+          ].slice(-40)
+        } else if (chunk.code || chunk.message) {
+          threadState.runtimeDiagnostics = [
+            ...(threadState.runtimeDiagnostics || []),
+            chunk
+          ].slice(-40)
         }
         return false
 

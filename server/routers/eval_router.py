@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 
@@ -14,8 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.db import get_db
 from server.deps import get_required_user
-from server.models import Base  # noqa: F401  (ensure metadata)
-from server.services.eval_service import EvaluationCase, EvaluationRun, judge_case
+from server.models import EvaluationCase, EvaluationRun
+from server.services.eval_service import judge_case
 
 eval_router = APIRouter(prefix="/eval", tags=["eval"])
 
@@ -118,13 +117,15 @@ async def _run_one(token: str, question: str, agent_slug: str = "default-chatbot
     """单 case 走真实 run + SSE 链路。"""
     base = "http://localhost:8000"
     headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(base_url=base, timeout=httpx.Timeout(240)) as c:
+    async with httpx.AsyncClient(
+        base_url=base, timeout=httpx.Timeout(240), trust_env=False,
+    ) as c:
         th = (await c.post("/api/chat/thread", json={"agent_id": agent_slug, "title": "eval"},
                            headers=headers)).json()["thread"]["id"]
         r = await c.post("/api/agent/runs", json={
             "query": question, "agent_slug": agent_slug,
             "thread_id": th, "queue_policy": "enqueue"}, headers=headers)
-        rid = r.json()["run"]["id"]
+        rid = r.json()["id"]
 
         answer, tools = "", []
         async with c.stream("GET", f"/api/agent/runs/{rid}/events", headers=headers) as resp:
@@ -140,5 +141,5 @@ async def _run_one(token: str, question: str, agent_slug: str = "default-chatbot
                     answer += str(value or "")
                 elif event_type == "tool_call" and value:
                     tools.append(str(value))
-        status = (await c.get(f"/api/agent/runs/{rid}", headers=headers)).json()["run"]["status"]
+        status = (await c.get(f"/api/agent/runs/{rid}", headers=headers)).json()["status"]
         return answer, tools, status

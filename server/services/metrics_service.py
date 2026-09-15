@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from sqlalchemy import text as sa_text
 
@@ -65,10 +65,10 @@ async def tool_stats(hours: int = 24) -> dict:
     since = utc_now_naive() - timedelta(hours=hours)  # 传 naive datetime（DB 列 timestamp without time zone）
     async with async_session_factory() as db:
         r = await db.execute(sa_text("""
-            SELECT payload->'tool_call'->>'name' AS tool, COUNT(*) AS calls
+            SELECT payload->'chunk'->'stream_event'->>'name' AS tool, COUNT(*) AS calls
             FROM run_events
-            WHERE event_type = 'stream_event'
-              AND payload->>'type' = 'tool_call'
+            WHERE event_type = 'messages'
+              AND payload->'chunk'->'stream_event'->>'type' = 'tool_call'
               AND created_at >= :since
             GROUP BY 1 ORDER BY calls DESC
         """), {"since": since})

@@ -514,8 +514,10 @@ import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import { formatExtensionCardTitle } from '@/utils/extensionDisplayName'
 import { getShareConfigLabel } from '@/utils/shareConfig'
 import { getSkillIcon } from '@/utils/skill_icon_utils'
+import { useUserStore } from '@/stores/user'
 
 const router = useRouter()
+const userStore = useUserStore()
 
 const loading = ref(false)
 const importing = ref(false)
@@ -566,6 +568,9 @@ const remoteSelectionSummary = computed(() => {
 })
 
 const repoHistory = ref([])
+const repoHistoryStorageKey = computed(() =>
+  userStore.uid ? `yuxi_remote_repo_history:${userStore.uid}` : 'yuxi_remote_repo_history'
+)
 
 const matchesSearch = (skill) => {
   if (!searchQuery.value) return true
@@ -598,11 +603,6 @@ const skillGroups = computed(() => [
     skills: isBatchDeleteMode.value
       ? []
       : filteredInstalledSkills.value.filter((skill) => skill.sourceScope === 'personal')
-  },
-  {
-    key: 'builtin',
-    title: '内置',
-    skills: filteredInstalledSkills.value.filter((skill) => skill.sourceType === 'builtin')
   },
   {
     key: 'uploaded',
@@ -906,7 +906,8 @@ const handleBatchDelete = () => {
       loading.value = true
       try {
         const res = await skillApi.deleteSkillsBatch(deletableSlugs)
-        const results = res?.data || []
+        const results = Array.isArray(res?.data) ? res.data : Array.isArray(res?.results) ? res.results : []
+        if (!results.length) throw new Error('服务端未返回批量删除结果')
         const successList = results.filter((r) => r.success)
         const failList = results.filter((r) => !r.success)
 
@@ -928,16 +929,42 @@ const handleBatchDelete = () => {
 }
 
 const fetchSkills = async ({ refreshPersonal = false } = {}) => {
+  const requestUid = String(userStore.uid || '')
+  if (!requestUid) {
+    skills.value = []
+    return
+  }
   loading.value = true
   try {
     const skillResult = await skillApi.listSkillCards({ refreshPersonal })
+    // 登录用户可能在请求返回前切换；旧用户的数据不能回填到新用户界面。
+    if (requestUid !== String(userStore.uid || '')) return
     skills.value = skillResult?.data || []
   } catch {
+    if (requestUid !== String(userStore.uid || '')) return
     message.error('加载失败')
   } finally {
     loading.value = false
   }
 }
+
+watch(
+  () => userStore.uid,
+  (uid, previousUid) => {
+    if (uid === previousUid) return
+    // 清掉旧用户的选中项、预览和安装流程，避免跨账号复用本地组件状态。
+    skills.value = []
+    selectedCardSlugs.value = []
+    isBatchDeleteMode.value = false
+    closeSkillPreview()
+    if (installFlowOpen.value) closeInstallFlow()
+    repoHistory.value = []
+    if (uid) {
+      loadHistory()
+      fetchSkills({ refreshPersonal: true })
+    }
+  }
+)
 
 const beforeSkillUpload = (file) => {
   const lower = file.name.toLowerCase()
@@ -1011,7 +1038,7 @@ const rememberRemoteSource = (source) => {
     history = history.slice(0, 10)
   }
   repoHistory.value = history
-  localStorage.setItem('yuxi_remote_repo_history', JSON.stringify(history))
+  localStorage.setItem(repoHistoryStorageKey.value, JSON.stringify(history))
 }
 
 const handleListRemoteSkills = async () => {
@@ -1046,7 +1073,7 @@ const handleListRemoteSkills = async () => {
 
 const loadHistory = () => {
   try {
-    const raw = localStorage.getItem('yuxi_remote_repo_history')
+    const raw = localStorage.getItem(repoHistoryStorageKey.value)
     if (raw) {
       repoHistory.value = JSON.parse(raw)
     }
@@ -1057,12 +1084,12 @@ const loadHistory = () => {
 
 const deleteHistoryItem = (item) => {
   repoHistory.value = repoHistory.value.filter((h) => h !== item)
-  localStorage.setItem('yuxi_remote_repo_history', JSON.stringify(repoHistory.value))
+  localStorage.setItem(repoHistoryStorageKey.value, JSON.stringify(repoHistory.value))
 }
 
 const clearAllHistory = () => {
   repoHistory.value = []
-  localStorage.removeItem('yuxi_remote_repo_history')
+  localStorage.removeItem(repoHistoryStorageKey.value)
   message.success('历史记录已清空')
 }
 

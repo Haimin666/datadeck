@@ -2,7 +2,7 @@
 
 import pytest
 from langchain.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from datadeck.adapters.checkpointer import MemoryCheckpointerProvider

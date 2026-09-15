@@ -8,13 +8,19 @@ from .registry import (
     get_all_extra_metadata,
     get_all_tool_instances,
     get_extra_metadata,
+    register_tool,
+    unregister_tool,
     tool,
 )
+from .service import get_tool_descriptors
 
 __all__ = [
     "get_extra_metadata",
     "get_all_extra_metadata",
     "get_all_tool_instances",
+    "register_tool",
+    "unregister_tool",
     "ToolExtraMetadata",
+    "get_tool_descriptors",
     "tool",
 ]

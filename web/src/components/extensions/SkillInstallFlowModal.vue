@@ -146,7 +146,7 @@
                 @click="installTarget = 'shared'"
               >
                 <span class="install-target-title">共享 Skill</span>
-                <span>进入平台 Skill 库，并继续配置指定人、部门或全局范围。</span>
+                <span>进入平台 Skill 库，并继续配置指定用户或全局范围。</span>
               </button>
             </div>
             <div v-if="installTarget === 'personal'" class="personal-install-note">
@@ -158,7 +158,7 @@
             <ShareConfigForm
               ref="shareConfigFormRef"
               v-model="shareConfig"
-              :auto-select-user-dept="true"
+              :auto-select-current-user="true"
               :allowed-access-levels="allowedAccessLevels"
             />
           </div>
@@ -247,7 +247,7 @@ const reviewItems = ref([])
 const installItems = ref([])
 const shareConfig = ref({
   version: 2,
-  read_scope: { access_level: 'user', department_ids: [], user_uids: [] },
+  read_scope: { access_level: 'user', user_uids: [] },
   manage_scope: null
 })
 const installTarget = ref('personal')
@@ -304,9 +304,7 @@ const loadingSourceCount = computed(
 )
 const shareScopeLabel = computed(() => {
   const scope = shareConfig.value.read_scope || shareConfig.value.manage_scope || shareConfig.value
-  return (
-    { global: '全局共享', department: '部门共享', user: '指定人' }[scope.access_level] || '指定人'
-  )
+  return { global: '全局共享', user: '指定人' }[scope.access_level] || '指定人'
 })
 const installTargetLabel = computed(() =>
   installTarget.value === 'personal' ? '个人 Skill' : shareScopeLabel.value
@@ -347,20 +345,17 @@ const cloneShareConfig = (config) => ({
       ? config.read_scope
         ? {
             access_level: config.read_scope.access_level || 'user',
-            department_ids: [...(config.read_scope.department_ids || [])],
             user_uids: [...(config.read_scope.user_uids || [])]
           }
         : null
       : {
           access_level: config?.access_level || 'user',
-          department_ids: [...(config?.department_ids || [])],
           user_uids: [...(config?.user_uids || [])]
         },
   manage_scope:
     config?.version === 2 && config.manage_scope
       ? {
           access_level: config.manage_scope.access_level || 'global',
-          department_ids: [...(config.manage_scope.department_ids || [])],
           user_uids: [...(config.manage_scope.user_uids || [])]
         }
       : null

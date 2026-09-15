@@ -1,5 +1,7 @@
 # 数据工具集：SQL 执行 / OMD 元数据 / RAG 检索（企业 DataAgent 三件套）。
 # 执行层在 sql_executor.py / omd_client.py / rag_store.py，本模块做 @tool 注册 + 熔断接入。
+# 平台运行时由 server 装配器把 rag_search 绑定到 PostgreSQL 知识库；这里的
+# rag_store 仅服务 datadeck 的独立 standalone 调用，不是平台事实存储。
 
 import asyncio as _asyncio
 
@@ -28,39 +30,56 @@ async def sql_execute_query(sql: str) -> dict:
 
 # ── OMD 元数据 ────────────────────────────────────────────
 
-@tool(category="data", tags=["元数据", "表结构"], display_name="列出库与 Schema",
-      description="列出企业数仓的所有数据库和 Schema。用于：用户问【有哪些库/有哪些主题域】时。")
-async def omd_list_databases() -> dict:
-    """List all databases and schemas in the enterprise data warehouse (via OpenMetadata)."""
+@tool(category="data", tags=["元数据", "表结构", "Service"], display_name="列出库与 Schema",
+      description="列出 OMD Token 可见的全部数据库类 Service、数据库和 Schema；可传 service_name 限定 Service。")
+async def omd_list_databases(service_name: str = "") -> dict:
+    """List databases across all visible OpenMetadata database services."""
     from datadeck.agents.toolkits.omd_client import list_databases, list_schemas
 
     from datadeck.agents.toolkits.circuit_breaker import aguard
 
-    dbs = await aguard("omd_list_databases", lambda: _sync(list_databases))
-    if dbs.get("ok"):
-        schemas = await aguard("omd_list_databases", lambda: _sync(list_schemas))
+    dbs = await aguard("omd_list_databases", lambda: _sync(list_databases, service_name or None))
+    if dbs.get("ok") and service_name:
+        schemas = await aguard("omd_list_databases", lambda: _sync(list_schemas, None, service_name))
         dbs["schemas"] = schemas.get("schemas", []) if schemas.get("ok") else []
     return dbs
 
 
 @tool(category="data", tags=["元数据", "表清单"], display_name="列出 Schema 下的表",
       description="列出指定 Schema 下的全部表（含表描述）。用于：用户问【XX 主题域有哪些表】或需要浏览表清单时。")
-async def omd_list_tables(schema_name: str) -> dict:
+async def omd_list_tables(schema_name: str, service_name: str = "", database_name: str = "") -> dict:
     """List all tables in a schema (with descriptions) via OpenMetadata."""
     from datadeck.agents.toolkits.cache import cached_meta_async
     from datadeck.agents.toolkits.circuit_breaker import aguard
     from datadeck.agents.toolkits.omd_client import list_tables
 
     async def _run() -> dict:
-        return await aguard("omd_list_tables", lambda: _sync(list_tables, schema_name))
+        return await aguard("omd_list_tables", lambda: _sync(
+            list_tables, schema_name, database_name or None, service_name or None))
 
-    return await cached_meta_async(("omd_list_tables", schema_name), _run)
+    return await cached_meta_async(("omd_list_tables", service_name, database_name, schema_name), _run)
+
+
+@tool(category="data", tags=["元数据", "表搜索", "Service"], display_name="搜索表",
+      description="跨全部可见 OMD Service 搜索表。用户只给表名、未给 Service/数据库/Schema 时必须优先使用。"
+                  "命中多个候选时，先把候选返回给用户确认，禁止猜测默认 Service。")
+async def omd_search_tables(
+    table_name: str, service_name: str = "", database_name: str = "",
+    schema_name: str = "", limit: int = 20,
+) -> dict:
+    """Search tables across all visible OpenMetadata database services."""
+    from datadeck.agents.toolkits.circuit_breaker import aguard
+    from datadeck.agents.toolkits.omd_client import search_tables
+
+    return await aguard("omd_search_tables", lambda: _sync(
+        search_tables, table_name, service_name or None, database_name or None,
+        schema_name or None, limit))
 
 
 @tool(category="data", tags=["元数据", "表结构", "Text2SQL"], display_name="查询表结构",
       description="查询某张表的完整结构：字段名、类型、字段注释。"
                   "【写 SQL 前必须先用本工具确认表结构】，禁止凭空猜测表名字段名。")
-async def omd_get_table_schema(schema_name: str, table: str) -> dict:
+async def omd_get_table_schema(schema_name: str, table: str, service_name: str = "", database_name: str = "") -> dict:
     """Get full column schema (name/type/comment) of a table via OpenMetadata."""
     from datadeck.agents.toolkits.cache import cached_meta_async
     from datadeck.agents.toolkits.circuit_breaker import aguard
@@ -68,22 +87,26 @@ async def omd_get_table_schema(schema_name: str, table: str) -> dict:
 
     async def _run() -> dict:
         return await aguard(
-            "omd_get_table_schema", lambda: _sync(get_table_schema, schema_name, table))
+            "omd_get_table_schema", lambda: _sync(
+                get_table_schema, schema_name, table, database_name or None, service_name or None))
 
-    return await cached_meta_async(("omd_get_table_schema", schema_name, table), _run)
+    return await cached_meta_async(("omd_get_table_schema", service_name, database_name, schema_name, table), _run)
 
 
 @tool(category="data", tags=["元数据", "血缘"], display_name="查询表血缘",
       description="查询某张表的上游/下游血缘依赖。用于：用户问【这张表数据从哪来/下游谁在用/血缘】时。"
                   "direction: up=上游, down=下游, both=全部。")
 async def omd_get_table_lineage(
-    schema_name: str, table: str, direction: str = "both", depth: int = 1
+    schema_name: str, table: str, direction: str = "both", depth: int = 1,
+    service_name: str = "", database_name: str = ""
 ) -> dict:
     """Get upstream/downstream lineage of a table via OpenMetadata."""
     from datadeck.agents.toolkits.circuit_breaker import aguard
     from datadeck.agents.toolkits.omd_client import get_table_lineage
 
-    return await aguard("omd_get_table_lineage", lambda: _sync(get_table_lineage, schema_name, table, depth=depth, direction=direction))
+    return await aguard("omd_get_table_lineage", lambda: _sync(
+        get_table_lineage, schema_name, table, depth=depth, direction=direction,
+        database=database_name or None, service=service_name or None))
 
 
 # ── RAG 检索 ──────────────────────────────────────────────

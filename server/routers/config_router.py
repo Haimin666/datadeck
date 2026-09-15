@@ -2,7 +2,7 @@
 
 - system_configs: 全局配置（管理员读写；前端 configStore 消费 {key: value} 平铺字典）
 - user_configs:   每用户配置（登录即读写；enable_memory 等）
-- /api/user/agent-env, /api/user/upload-image: 个人环境与头像
+- /api/user/upload-image: 用户图片上传
 """
 
 from __future__ import annotations
@@ -199,26 +199,6 @@ async def update_user_config(
     return cfg
 
 
-@config_router.get("/user/agent-env")
-async def get_agent_env(current_user: User = Depends(get_required_user)):
-    """个人环境变量（注入 agent 上下文）。"""
-    cfg = await _get_user_config_json(current_user.uid)
-    return {"env": cfg.get("agent_env", {})}
-
-
-@config_router.put("/user/agent-env")
-async def update_agent_env(
-    body: dict,
-    current_user: User = Depends(get_required_user),
-):
-    cfg = await _get_user_config_json(current_user.uid)
-    env = cfg.get("agent_env") or {}
-    env.update((body or {}).get("env") or {})
-    cfg["agent_env"] = env
-    await _set_user_config_json(current_user.uid, cfg)
-    return {"ok": True, "env": env}
-
-
 @config_router.post("/user/upload-image")
 async def upload_user_image(
     file: UploadFile,
@@ -233,7 +213,7 @@ async def upload_user_image(
     if len(data) > 10 * 1024 * 1024:
         raise HTTPException(status_code=422, detail="图片不能超过 10MB")
     # 图片使用独立目录，由 main.py 以 /uploads/images 提供静态访问。
-    upload_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads", "images"))
+    upload_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "images"))
     os.makedirs(upload_dir, exist_ok=True)
     name = f"{_uuid.uuid4().hex}{ext}"
     with open(os.path.join(upload_dir, name), "wb") as f:

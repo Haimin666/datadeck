@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import re
-import urllib.parse
 from typing import Any
 
 import httpx
@@ -32,10 +31,6 @@ ALLOWED_EXTRA_BODY_FIELDS = {
     "thinking_budget",
 }
 _PROVIDER_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{1,99}$")
-_REMOTE_API_NO_PROXY_HOSTS = {"apihub.agnes-ai.com"}
-_REMOTE_API_DIRECT_HOSTS = {"localhost", "127.0.0.1", "::1"}
-
-
 def _normalize_list(value: Any) -> list:
     return value if isinstance(value, list) else []
 
@@ -47,11 +42,6 @@ def _normalize_dict(value: Any) -> dict:
 def _validate_provider_id(provider_id: str) -> None:
     if not _PROVIDER_ID_RE.match(provider_id):
         raise ValueError("provider_id 只能包含字母、数字、下划线和中划线，长度 2-100")
-
-
-def _use_direct_http_client(base_url: str) -> bool:
-    host = urllib.parse.urlparse(base_url).hostname or ""
-    return host.lower() in _REMOTE_API_NO_PROXY_HOSTS | _REMOTE_API_DIRECT_HOSTS
 
 
 def _normalize_model_item(model: dict[str, Any]) -> dict[str, Any]:
@@ -420,10 +410,12 @@ async def fetch_remote_models(provider: ModelProvider) -> list[dict[str, Any]]:
 
     seen_ids: set[tuple[str, str]] = set()
     models: list[dict[str, Any]] = []
-    async with httpx.AsyncClient(
-        timeout=40.0,
-        trust_env=not _use_direct_http_client(provider.base_url),
-    ) as client:
+    # 项目网络请求不继承宿主 HTTP_PROXY/HTTPS_PROXY；需要代理时只能由
+    # 当前供应商显式配置 proxy_url。
+    client_kwargs = {"timeout": 40.0, "trust_env": False}
+    if provider.proxy_url:
+        client_kwargs.update(proxy=provider.proxy_url, trust_env=False)
+    async with httpx.AsyncClient(**client_kwargs) as client:
         results = await asyncio.gather(
             *[
                 _fetch_models_from_endpoint(client, provider, headers, endpoint, model_type)
@@ -463,10 +455,10 @@ async def test_model_status_by_spec(spec: str) -> dict:
                     if api_key and endpoint:
                         headers = {"Authorization": f"Bearer {api_key}"}
                 if endpoint:
-                    async with httpx.AsyncClient(
-                        timeout=15,
-                        trust_env=not _use_direct_http_client(provider.base_url),
-                    ) as client:
+                    client_kwargs = {"timeout": 15, "trust_env": False}
+                    if provider.proxy_url:
+                        client_kwargs.update(proxy=provider.proxy_url, trust_env=False)
+                    async with httpx.AsyncClient(**client_kwargs) as client:
                         resp = await client.get(endpoint, headers=headers)
                     ok = resp.status_code == 200
                     return {
@@ -491,9 +483,9 @@ async def test_model_status_by_spec(spec: str) -> dict:
             if not api_key or not base_url:
                 return {"spec": spec, "status": "unavailable", "message": "供应商缺少 api_key/base_url", "model_type": model_type}
 
-            direct = _use_direct_http_client(base_url)
-            sync_client = httpx.Client(trust_env=False) if direct else None
-            async_client = httpx.AsyncClient(trust_env=False) if direct else None
+            proxy = provider.proxy_url if provider is not None else ""
+            sync_client = httpx.Client(proxy=proxy, trust_env=False)
+            async_client = httpx.AsyncClient(proxy=proxy, trust_env=False)
             try:
                 model = ChatOpenAI(
                     model=model_id,

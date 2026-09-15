@@ -1,9 +1,6 @@
 """datadeck 数据库模型（精简版，仅 M1 所需）。"""
 from __future__ import annotations
 
-import uuid
-from datetime import datetime, timezone
-
 from sqlalchemy import (
     BigInteger, Boolean, Column, DateTime, ForeignKey, Identity, Integer, String,
     Text, UniqueConstraint, Index, Float, func
@@ -46,16 +43,45 @@ class User(Base):
         }
 
 
+class Role(Base):
+    """可分配给用户的角色；User.role 保存其 slug，避免破坏既有账号。"""
+
+    __tablename__ = "roles"
+
+    slug = Column(String(32), primary_key=True)
+    name = Column(String(64), nullable=False, unique=True)
+    description = Column(Text, nullable=False, default="", server_default="")
+    permissions = Column(JSON, nullable=False, default=list, server_default="[]")
+    agent_slugs = Column(JSON, nullable=False, default=list, server_default="[]")
+    is_builtin = Column(Boolean, nullable=False, default=False, server_default="false")
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "slug": self.slug,
+            "name": self.name,
+            "description": self.description or "",
+            "permissions": self.permissions or [],
+            "agent_slugs": self.agent_slugs or [],
+            "is_builtin": bool(self.is_builtin),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 # ── Thread (对话线程) ──────────────────────────────────────
 class Thread(Base):
     __tablename__ = "threads"
     __table_args__ = (
         # uid 列已有 index=True（自动 ix_threads_uid），勿重复声明同名索引
         Index("ix_threads_agent_id", "agent_id"),
+        Index("uq_threads_uid_request_id", "uid", "request_id", unique=True),
     )
 
     id = Column(String(64), primary_key=True)
     uid = Column(String(64), nullable=False, index=True)
+    request_id = Column(String(64), nullable=True)
     agent_id = Column(String(128), nullable=False)
     project_id = Column(String(64), nullable=True, index=True)
     title = Column(String(256), nullable=False, default="新的对话")
@@ -72,6 +98,7 @@ class Thread(Base):
         return {
             "id": self.id,
             "uid": self.uid,
+            "request_id": self.request_id,
             "agent_id": self.agent_id,
             "project_id": self.project_id,
             "title": self.title,
@@ -94,6 +121,7 @@ class KnowledgeBase(Base):
     uid = Column(String(64), ForeignKey("users.uid", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String(128), nullable=False)
     description = Column(Text, nullable=False, default="", server_default="")
+    access_scope = Column(String(16), nullable=False, default="shared", server_default="shared")
     embedding_model = Column(String(256), nullable=False, default="BAAI/bge-m3", server_default="BAAI/bge-m3")
     collection_name = Column(String(128), nullable=False, unique=True)
     created_at = Column(DateTime, default=utc_now_naive, nullable=False)
@@ -106,6 +134,7 @@ class KnowledgeBase(Base):
             "uid": self.uid,
             "name": self.name,
             "description": self.description or "",
+            "access_scope": self.access_scope or "shared",
             "embedding_model": self.embedding_model,
             "collection_name": self.collection_name,
             "document_count": document_count,
@@ -123,18 +152,31 @@ class KnowledgeDocument(Base):
     kb_id = Column(String(64), ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False, index=True)
     filename = Column(String(512), nullable=False)
     content = Column(Text, nullable=False)
+    source_type = Column(String(32), nullable=False, default="upload", server_default="upload")
+    source_id = Column(String(512), nullable=False, default="", server_default="")
+    layer = Column(String(16), nullable=False, default="hot", server_default="hot")
+    content_hash = Column(String(64), nullable=False, default="", server_default="")
+    metadata_json = Column(JSON, nullable=False, default=dict, server_default="{}")
+    version = Column(String(64), nullable=False, default="1", server_default="1")
     status = Column(String(32), nullable=False, default="pending", server_default="pending")
     chunk_count = Column(Integer, nullable=False, default=0, server_default="0")
     error_message = Column(Text, nullable=False, default="", server_default="")
     created_at = Column(DateTime, default=utc_now_naive, nullable=False)
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
 
-    def to_dict(self) -> dict:
-        return {
+    def to_dict(self, *, include_content: bool = False) -> dict:
+        data = {
             "id": self.id,
             "document_id": self.id,
             "kb_id": self.kb_id,
             "filename": self.filename,
+            "source_type": self.source_type or "upload",
+            "source_kind": self.source_type or "upload",
+            "source_id": self.source_id or self.id,
+            "layer": self.layer or "hot",
+            "content_hash": self.content_hash or "",
+            "metadata": self.metadata_json or {},
+            "version": self.version or "1",
             "status": self.status,
             "chunk_count": self.chunk_count,
             "error_message": self.error_message or "",
@@ -142,6 +184,9 @@ class KnowledgeDocument(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+        if include_content:
+            data["content"] = self.content
+        return data
 
 
 class KnowledgeChunk(Base):
@@ -169,6 +214,83 @@ class KnowledgeChunk(Base):
             "chunk_index": self.chunk_index,
             "content": self.content,
             "metadata": self.metadata_json or {},
+        }
+
+
+class CodeRepository(Base):
+    """绑定到知识库的 Git 代码源；凭证只保存加密值。"""
+
+    __tablename__ = "code_repositories"
+    __table_args__ = (Index("ix_code_repositories_kb", "kb_id"),)
+
+    id = Column(String(64), primary_key=True)
+    kb_id = Column(String(64), ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False, index=True)
+    uid = Column(String(64), nullable=False, index=True)
+    name = Column(String(128), nullable=False)
+    repo_url = Column(String(1024), nullable=False)
+    branch = Column(String(256), nullable=False, default="main", server_default="main")
+    subdir = Column(String(512), nullable=False, default="", server_default="")
+    ssh_key_encrypted = Column(Text, nullable=False, default="", server_default="")
+    access_token_encrypted = Column(Text, nullable=False, default="", server_default="")
+    local_path = Column(String(1024), nullable=False)
+    last_commit = Column(String(128), nullable=False, default="", server_default="")
+    last_sync_at = Column(DateTime, nullable=True)
+    sync_status = Column(String(32), nullable=False, default="never", server_default="never")
+    sync_error = Column(Text, nullable=False, default="", server_default="")
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "kb_id": self.kb_id, "uid": self.uid,
+            "name": self.name, "repo_url": self.repo_url, "branch": self.branch,
+            "subdir": self.subdir or "", "has_ssh_key": bool(self.ssh_key_encrypted),
+            "has_access_token": bool(self.access_token_encrypted),
+            "last_commit": self.last_commit or "", "last_sync_at": self.last_sync_at.isoformat() if self.last_sync_at else None,
+            "sync_status": self.sync_status, "sync_error": self.sync_error or "",
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class CodeRepositoryFile(Base):
+    """Git 仓库某个 commit 的文件索引；原始文件仍以 Git 快照为事实来源。"""
+
+    __tablename__ = "code_repository_files"
+    __table_args__ = (
+        UniqueConstraint("repository_id", "commit_sha", "path", name="uq_code_repository_files_snapshot"),
+        Index("ix_code_repository_files_repository_path", "repository_id", "path"),
+        Index("ix_code_repository_files_commit", "repository_id", "commit_sha"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    repository_id = Column(String(64), ForeignKey("code_repositories.id", ondelete="CASCADE"), nullable=False, index=True)
+    commit_sha = Column(String(128), nullable=False)
+    path = Column(String(1024), nullable=False)
+    language = Column(String(32), nullable=False, default="", server_default="")
+    size = Column(Integer, nullable=False, default=0, server_default="0")
+    content_hash = Column(String(64), nullable=False, default="", server_default="")
+    parse_status = Column(String(32), nullable=False, default="not_sql", server_default="not_sql")
+    tables_json = Column(JSON, nullable=False, default=list, server_default="[]")
+    columns_json = Column(JSON, nullable=False, default=list, server_default="[]")
+    features_json = Column(JSON, nullable=False, default=dict, server_default="{}")
+    indexed_at = Column(DateTime, default=utc_now_naive, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "repository_id": self.repository_id,
+            "source_kind": "code",
+            "commit": self.commit_sha,
+            "path": self.path,
+            "language": self.language,
+            "size": self.size,
+            "content_hash": self.content_hash,
+            "parse_status": self.parse_status,
+            "tables": self.tables_json or [],
+            "columns": self.columns_json or [],
+            "features": self.features_json or {},
+            "indexed_at": self.indexed_at.isoformat() if self.indexed_at else None,
         }
 
 
@@ -332,6 +454,7 @@ class ModelProvider(Base):
     provider_type = Column(String(32), nullable=False, default="openai")
     default_protocol = Column(String(64), nullable=True)
     base_url = Column(String(500), nullable=False)
+    proxy_url = Column(String(500), nullable=True)
     embedding_base_url = Column(String(500), nullable=True)
     rerank_base_url = Column(String(500), nullable=True)
     models_endpoint = Column(String(200), nullable=True)
@@ -358,13 +481,16 @@ class ModelProvider(Base):
             "provider_type": self.provider_type,
             "default_protocol": self.default_protocol,
             "base_url": self.base_url,
+            "proxy_url": self.proxy_url,
             "embedding_base_url": self.embedding_base_url,
             "rerank_base_url": self.rerank_base_url,
             "models_endpoint": self.models_endpoint,
             "embedding_models_endpoint": self.embedding_models_endpoint,
             "rerank_models_endpoint": self.rerank_models_endpoint,
             "api_key_env": self.api_key_env,
-            "api_key": self.api_key,
+            # 凭证只在宿主运行时解析，接口永不返回明文；编辑页用
+            # api_key_configured 判断是否已配置，留空更新表示保持原值。
+            "api_key_configured": bool(self.api_key or self.api_key_env),
             "capabilities": self.capabilities or [],
             "enabled_models": self.enabled_models or [],
             "headers_json": self.headers_json or {},
@@ -613,7 +739,8 @@ class Agent(Base):
     is_builtin = Column(Boolean, nullable=False, default=False)
     icon = Column(String(512), nullable=True)
     share_config = Column(JSON, nullable=False, default=dict)
-    is_subagent = Column(Boolean, nullable=False, default=False)
+    execution_role = Column(String(32), nullable=False, default="standalone", server_default="standalone")
+    delegation_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
     created_at = Column(DateTime, default=utc_now_naive, nullable=False)
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
 
@@ -628,7 +755,8 @@ class Agent(Base):
             "is_builtin": self.is_builtin,
             "icon": self.icon,
             "share_config": self.share_config or {},
-            "is_subagent": self.is_subagent,
+            "execution_role": self.execution_role or "standalone",
+            "delegation_enabled": bool(self.delegation_enabled) and self.execution_role != "subagent",
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -649,41 +777,14 @@ class UserConfig(Base):
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
 
 
-class AgentMaterial(Base):
-    """DataAgent 已整理物料的持久化快照（原文/代码/OMD/Ossie 均可追溯）。"""
-    __tablename__ = "agent_materials"
-    __table_args__ = (
-        UniqueConstraint("source_type", "source_id", name="uq_agent_materials_source"),
-        Index("ix_agent_materials_type_layer", "source_type", "layer"),
-    )
-
-    id = Column(String(128), primary_key=True)
-    source_type = Column(String(32), nullable=False)  # wiki/business_doc/code/omd/ossie
-    source_id = Column(String(512), nullable=False)
-    title = Column(String(512), nullable=False, default="")
-    content = Column(Text, nullable=False, default="")
-    metadata_json = Column(JSON, nullable=False, default=dict, server_default="{}")
-    layer = Column(String(16), nullable=False, default="cold", server_default="cold")
-    status = Column(String(32), nullable=False, default="active", server_default="active")
-    content_hash = Column(String(64), nullable=False)
-    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
-    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
-
-    def to_dict(self) -> dict:
-        return {
-            "id": self.id, "source_type": self.source_type, "source_id": self.source_id,
-            "title": self.title, "content": self.content, "metadata": self.metadata_json or {},
-            "layer": self.layer, "status": self.status,
-            "content_hash": self.content_hash,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-        }
-
-
 class MetricRegistry(Base):
     """Ossie 指标注册表与审核状态。"""
     __tablename__ = "metric_registry"
-    __table_args__ = (Index("ix_metric_registry_domain", "domain"),)
+    __table_args__ = (
+        Index("ix_metric_registry_domain", "domain"),
+        Index("ix_metric_registry_status_conflict_updated", "status", "conflict_status", "updated_at"),
+        Index("ix_metric_registry_updated_at", "updated_at"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     canonical_name = Column(String(128), nullable=False, unique=True)
@@ -718,8 +819,77 @@ class MetricRegistry(Base):
         }
 
 
-# 扩展模型仍由功能模块实现行为，但统一从此处注册/导出，避免应用入口维护隐式模型清单。
-# 这些导入放在基础模型声明之后，避免扩展模块反向导入 Base 时形成循环。
-from server.services.attachment_service import ThreadAttachment  # noqa: E402,F401
-from server.services.eval_service import EvaluationCase, EvaluationRun  # noqa: E402,F401
-from server.services.pg_memory_store import AgentMemory  # noqa: E402,F401
+# ── Runtime support models ────────────────────────────────
+class ThreadAttachment(Base):
+    """线程附件元数据；文件内容由 attachment_service 负责存取。"""
+
+    __tablename__ = "thread_attachments"
+    __table_args__ = (Index("ix_thread_attachments_thread", "thread_id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    thread_id = Column(String(64), nullable=False)
+    uid = Column(String(64), nullable=False)
+    file_name = Column(String(256), nullable=False)
+    file_type = Column(String(64), nullable=False, default="")
+    file_size = Column(Integer, nullable=False, default=0)
+    object_name = Column(String(128), nullable=False, unique=True)
+    status = Column(String(32), nullable=False, default="confirmed")
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "file_id": str(self.id),
+            "thread_id": self.thread_id,
+            "file_name": self.file_name,
+            "file_type": self.file_type,
+            "file_size": self.file_size,
+            "object_name": self.object_name,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class AgentMemory(Base):
+    """Agent 长期记忆元数据；读写行为由 PgMemoryStore 负责。"""
+
+    __tablename__ = "agent_memories"
+    __table_args__ = (Index("ix_agent_memories_uid", "uid"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    uid = Column(String(64), nullable=False)
+    thread_id = Column(String(64), nullable=True)
+    run_id = Column(String(64), nullable=True)
+    content = Column(Text, nullable=False)
+    replaces = Column(String(128), nullable=True)
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
+
+
+class EvaluationCase(Base):
+    """评测用例：问题、期望意图、工具和回答关键词。"""
+
+    __tablename__ = "evaluation_cases"
+    __table_args__ = (Index("ix_eval_cases_dataset", "dataset"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dataset = Column(String(64), nullable=False, default="default")
+    question = Column(Text, nullable=False)
+    expect_class = Column(String(32), nullable=False)
+    expect_tools = Column(JSON, nullable=False, default=list)
+    expect_keywords = Column(JSON, nullable=False, default=list)
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
+
+
+class EvaluationRun(Base):
+    """一次批量评测运行的汇总与逐题结果。"""
+
+    __tablename__ = "evaluation_runs"
+
+    id = Column(String(64), primary_key=True)
+    dataset = Column(String(64), nullable=False, index=True)
+    total = Column(Integer, nullable=False, default=0)
+    passed = Column(Integer, nullable=False, default=0)
+    tool_accuracy = Column(Integer, nullable=True)
+    faithfulness = Column(Integer, nullable=True)
+    details = Column(JSON, nullable=False, default=list)
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)

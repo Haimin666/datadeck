@@ -64,6 +64,7 @@ const providerForm = reactive({
   provider_type: 'openai',
   default_protocol: 'openai_compatible',
   base_url: '',
+  proxy_url: '',
   embedding_base_url: '',
   rerank_base_url: '',
   models_endpoint: '/models',
@@ -347,13 +348,14 @@ const openEditProviderModal = (provider) => {
     provider_type: provider.provider_type || 'openai',
     default_protocol: '',
     base_url: provider.base_url || '',
+    proxy_url: provider.proxy_url || '',
     embedding_base_url: provider.embedding_base_url || '',
     rerank_base_url: provider.rerank_base_url || '',
     models_endpoint: provider.models_endpoint ?? '',
     embedding_models_endpoint: provider.embedding_models_endpoint ?? '',
     rerank_models_endpoint: provider.rerank_models_endpoint ?? '',
     api_key_env: provider.api_key_env || '',
-    api_key: provider.api_key || '',
+    api_key: '',
     capabilities: provider.capabilities?.length ? provider.capabilities : ['chat'],
     is_enabled: provider.is_enabled !== false,
     headers_text: formatJsonText(provider.headers_json),
@@ -362,12 +364,14 @@ const openEditProviderModal = (provider) => {
   showProviderModal.value = true
 }
 
-const buildProviderPayload = () => ({
+const buildProviderPayload = () => {
+  const payload = {
   provider_id: providerForm.provider_id || undefined,
   display_name: providerForm.display_name,
   provider_type: providerForm.provider_type,
   default_protocol: null,
   base_url: providerForm.base_url,
+  proxy_url: providerForm.proxy_url || null,
   embedding_base_url: providerForm.embedding_base_url || null,
   rerank_base_url: providerForm.rerank_base_url || null,
   models_endpoint: providerForm.models_endpoint || null,
@@ -379,7 +383,11 @@ const buildProviderPayload = () => ({
   is_enabled: providerForm.is_enabled,
   headers_json: parseJsonObject(providerForm.headers_text, '请求头'),
   extra_json: parseJsonObject(providerForm.extra_text, '扩展配置')
-})
+  }
+  // 服务端不回传明文凭证；编辑时留空表示保持已配置凭证。
+  if (editingProviderId.value && !providerForm.api_key) delete payload.api_key
+  return payload
+}
 
 const createProvider = async () => {
   saving.value = true
@@ -911,6 +919,15 @@ defineExpose({
             />
           </label>
         </div>
+
+        <label class="form-label">
+          <span>模型代理（可选）</span>
+          <a-input
+            v-model:value="providerForm.proxy_url"
+            placeholder="http://代理地址:端口"
+            autocomplete="off"
+          />
+        </label>
 
         <div class="form-row">
           <label class="form-label">

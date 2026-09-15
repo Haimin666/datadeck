@@ -18,12 +18,14 @@ from server.services.skills.service import (
     delete_skill_node,
     delete_skills_batch,
     delete_personal_skill,
+    delete_personal_skill_node,
     discard_skill_install_draft,
     export_skill_zip,
     get_allowed_skill_access_levels,
     get_manageable_skill_or_raise,
     get_skill_dependency_options,
     get_skill_tree,
+    get_personal_skill_tree,
     init_builtin_skills,
     is_builtin_skill,
     list_accessible_skills,
@@ -33,6 +35,8 @@ from server.services.skills.service import (
     prepare_remote_skill_install,
     prepare_skill_upload,
     read_personal_skill_file,
+    create_personal_skill_node,
+    update_personal_skill_file,
     read_skill_file,
     update_skill_dependencies,
     update_skill_enabled,
@@ -304,6 +308,59 @@ async def delete_personal_skill_route(
     except Exception as e:
         logger.error(f"Failed to delete personal Skill '{slug}': {e}")
         raise HTTPException(status_code=500, detail="删除个人 Skill 失败")
+
+
+@user_skills.get("/personal/{slug}/tree")
+async def get_personal_skill_tree_route(slug: str, current_user: User = Depends(get_required_user)):
+    try:
+        return {"success": True, "data": await get_personal_skill_tree(str(current_user.uid), slug)}
+    except ValueError as e:
+        _raise_from_value_error(e)
+    except Exception as e:
+        logger.error(f"Failed to get personal Skill tree '{slug}': {e}")
+        raise HTTPException(status_code=500, detail="获取个人 Skill 目录树失败")
+
+
+@user_skills.put("/personal/{slug}/file")
+async def update_personal_skill_file_route(
+    slug: str, payload: SkillFileUpdateRequest, current_user: User = Depends(get_required_user),
+):
+    try:
+        await update_personal_skill_file(str(current_user.uid), slug, payload.path, payload.content)
+        return {"success": True}
+    except ValueError as e:
+        _raise_from_value_error(e)
+    except Exception as e:
+        logger.error(f"Failed to update personal Skill file '{slug}/{payload.path}': {e}")
+        raise HTTPException(status_code=500, detail="更新个人 Skill 文件失败")
+
+
+@user_skills.post("/personal/{slug}/file")
+async def create_personal_skill_file_route(
+    slug: str, payload: SkillNodeCreateRequest, current_user: User = Depends(get_required_user),
+):
+    try:
+        await create_personal_skill_node(str(current_user.uid), slug, payload.path, payload.is_dir, payload.content)
+        return {"success": True}
+    except ValueError as e:
+        _raise_from_value_error(e)
+    except Exception as e:
+        logger.error(f"Failed to create personal Skill file '{slug}/{payload.path}': {e}")
+        raise HTTPException(status_code=500, detail="创建个人 Skill 文件失败")
+
+
+@user_skills.delete("/personal/{slug}/file")
+async def delete_personal_skill_file_route(
+    slug: str, path: str = Query(...), current_user: User = Depends(get_required_user),
+):
+    try:
+        await delete_personal_skill_node(str(current_user.uid), slug, path)
+        return {"success": True}
+    except ValueError as e:
+        _raise_from_value_error(e)
+    except Exception as e:
+        logger.error(f"Failed to delete personal Skill file '{slug}/{path}': {e}")
+        raise HTTPException(status_code=500, detail="删除个人 Skill 文件失败")
 
 
 @user_skills.delete("/install-drafts/{draft_id}")

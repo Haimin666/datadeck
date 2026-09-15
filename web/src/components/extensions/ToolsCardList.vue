@@ -130,7 +130,12 @@ const tools = ref([])
 const currentTool = ref(null)
 const detailVisible = ref(false)
 
-const categories = ['buildin', 'data', 'sql', 'filesystem', 'knowledge', 'platform', 'mysql', 'debug']
+const categories = computed(() => {
+  const preferred = ['buildin', 'data', 'filesystem', 'knowledge', 'platform', 'mcp', 'sql', 'mysql', 'debug']
+  const actual = new Set(tools.value.map((tool) => tool.category).filter(Boolean))
+  return preferred.filter((category) => actual.has(category))
+    .concat([...actual].filter((category) => !preferred.includes(category)).sort())
+})
 const categoryLabels = {
   buildin: '内置工具',
   data: '数据工具',
@@ -199,7 +204,7 @@ const fetchTools = async () => {
   loading.value = true
   try {
     const result = await toolApi.getTools()
-    tools.value = result?.data || []
+    tools.value = result?.items || []
   } catch {
     message.error('加载工具失败')
   } finally {

@@ -8,12 +8,14 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from fastapi import HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, Response
 from starlette.background import BackgroundTask
+from sqlalchemy import or_, select
 from server.services.runtime_paths import runtime_user_data_path
 from server.repositories.project_repository import ProjectRepository
 from server.services.file_preview import render_file_preview
-from server.models import User
+from server.services.knowledge_service import get_knowledge_base
+from server.models import User, CodeRepository, KnowledgeBase, KnowledgeDocument
 from server.utils.datetime_utils import utc_isoformat_from_timestamp
 from server.utils.filepreview import (
     MAX_BINARY_PREVIEW_SIZE_BYTES,
@@ -29,7 +31,6 @@ from server.workspace.paths import (
     ensure_user_workspace,
 )
 
-EDITABLE_WORKSPACE_SUFFIXES = {".md", ".markdown", ".mdx", ".txt"}
 MAX_WORKSPACE_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_BYTES
 MAX_WORKSPACE_UPLOAD_FILES = 50
 MAX_WORKSPACE_DOWNLOAD_SIZE_BYTES = 1024 * 1024 * 1024
@@ -37,6 +38,117 @@ MAX_WORKSPACE_DOWNLOAD_SIZE_BYTES = 1024 * 1024 * 1024
 # 搜索返回条数上限，避免超大工作区一次性返回过多结果
 WORKSPACE_SEARCH_MAX_RESULTS = 100
 WORKSPACE_SCOPE_ROOT = "/"
+PUBLIC_KNOWLEDGE_ROOT = "/public/knowledge-materials"
+
+
+def is_public_knowledge_path(path: str | None) -> bool:
+    normalized = _normalize_workspace_path(path).as_posix().rstrip("/")
+    return normalized == PUBLIC_KNOWLEDGE_ROOT or normalized.startswith(f"{PUBLIC_KNOWLEDGE_ROOT}/")
+
+
+def _public_entry(path: str, *, is_dir: bool, size: int = 0, modified_at=None, metadata=None) -> dict:
+    return {
+        "path": path if is_dir and path.endswith("/") else path,
+        "virtual_path": path,
+        "name": PurePosixPath(path.rstrip("/")).name or "公共知识物料",
+        "is_dir": is_dir,
+        "size": size,
+        "modified_at": modified_at.isoformat() if hasattr(modified_at, "isoformat") else str(modified_at or ""),
+        "readonly": True,
+        "metadata": metadata or {},
+    }
+
+
+async def _public_knowledge_tree(*, path: str, current_user: User, db) -> dict:
+    """以只读虚拟树展示知识库原始物料，不复制进个人工作区。"""
+    root = PUBLIC_KNOWLEDGE_ROOT
+    current = _normalize_workspace_path(path).as_posix().rstrip("/") or "/"
+    if current == "/":
+        return {"entries": [_public_entry(root + "/", is_dir=True)]}
+    if current != root and not current.startswith(root + "/"):
+        return {"entries": []}
+
+    bases = (KnowledgeBase.uid == str(current_user.uid), KnowledgeBase.access_scope.in_(("shared", "public")))
+    kb_rows = (await db.execute(select(KnowledgeBase).where(or_(*bases)))).scalars().all()
+    kb_by_id = {str(kb.id): kb for kb in kb_rows}
+    docs = (await db.execute(select(KnowledgeDocument).where(KnowledgeDocument.kb_id.in_(list(kb_by_id))))).scalars().all() if kb_by_id else []
+    repos = (await db.execute(select(CodeRepository).where(CodeRepository.kb_id.in_(list(kb_by_id))))).scalars().all() if kb_by_id else []
+    file_map: dict[str, dict] = {}
+    for doc in docs:
+        path_key = f"{root}/{doc.kb_id}/{doc.source_type}/{doc.id}/{doc.filename}"
+        file_map[path_key] = {
+            "is_dir": False, "size": len((doc.content or "").encode()), "modified_at": doc.updated_at,
+            "metadata": {"kb_id": doc.kb_id, "source_type": doc.source_type, "source_id": doc.source_id,
+                         "version": doc.version, "content_hash": doc.content_hash, "status": doc.status},
+        }
+    for repo in repos:
+        repo_root = Path(repo.local_path)
+        if not repo_root.is_dir():
+            continue
+        base = repo_root / (repo.subdir or "")
+        if not base.is_dir():
+            continue
+        for item in base.rglob("*"):
+            if item.is_file() and ".git" not in item.relative_to(base).parts:
+                relative = PurePosixPath(item.relative_to(base).as_posix())
+                path_key = f"{root}/{repo.kb_id}/code/{repo.id}/{relative}"
+                try:
+                    stat = item.stat()
+                except OSError:
+                    continue
+                file_map[path_key] = {
+                    "is_dir": False, "size": stat.st_size, "modified_at": utc_isoformat_from_timestamp(stat.st_mtime),
+                    "metadata": {"kb_id": repo.kb_id, "source_type": "code", "repository_id": repo.id,
+                                 "repository_name": repo.name, "branch": repo.branch, "commit": repo.last_commit,
+                                 "path": relative.as_posix()},
+                }
+
+    visible: dict[str, dict] = {}
+    for file_path, metadata in file_map.items():
+        if file_path == current:
+            continue
+        relative = file_path[len(current):].lstrip("/") if current != root else file_path[len(root):].lstrip("/")
+        first, _, rest = relative.partition("/")
+        child = f"{current}/{first}"
+        if rest:
+            child += "/"
+            visible[child] = {"is_dir": True}
+        else:
+            visible[child] = metadata
+    return {"entries": [_public_entry(key, **value) for key, value in sorted(visible.items())]}
+
+
+async def _read_public_knowledge_file(*, path: str, current_user: User, db) -> dict:
+    parts = [item for item in PurePosixPath(path).parts if item not in {"/", ""}]
+    if len(parts) < 5 or parts[0:2] != ["public", "knowledge-materials"]:
+        raise HTTPException(status_code=404, detail="公共知识物料不存在")
+    kb_id, source_type, source_id = parts[2], parts[3], parts[4]
+    kb = await get_knowledge_base(db, str(current_user.uid), kb_id)
+    if source_type == "code":
+        repo = await db.scalar(select(CodeRepository).where(CodeRepository.id == source_id, CodeRepository.kb_id == kb.id))
+        if repo is None:
+            raise HTTPException(status_code=404, detail="代码仓库不存在")
+        relative = PurePosixPath(*parts[5:])
+        target = (Path(repo.local_path) / (repo.subdir or "") / Path(*relative.parts)).resolve()
+        base = (Path(repo.local_path) / (repo.subdir or "")).resolve()
+        if base not in target.parents or not target.is_file():
+            raise HTTPException(status_code=404, detail="代码文件不存在")
+        try:
+            if target.stat().st_size > MAX_BINARY_PREVIEW_SIZE_BYTES:
+                return preview_too_large().payload()
+        except OSError as exc:
+            raise HTTPException(status_code=404, detail="代码文件不存在") from exc
+        if target.suffix.lower() not in {".sql", ".hql", ".py", ".sh", ".yaml", ".yml", ".json", ".md", ".txt", ".java", ".scala", ".js", ".ts", ".csv"}:
+            return {"filename": target.name, "content": "", "preview_type": "metadata", "media_type": "application/octet-stream"}
+        try:
+            raw_content = await asyncio.to_thread(target.read_bytes)
+            return await render_file_preview(path, raw_content, office_cache_key=f"public-material:{kb.id}:{source_id}")
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="代码文件不存在") from exc
+    doc = await db.scalar(select(KnowledgeDocument).where(KnowledgeDocument.id == source_id, KnowledgeDocument.kb_id == kb.id))
+    if doc is None:
+        raise HTTPException(status_code=404, detail="知识物料不存在")
+    return {"filename": doc.filename, "content": doc.content, "preview_type": "text", "media_type": "text/plain; charset=utf-8"}
 
 
 async def search_workspace_files(*, query: str, current_user: User) -> dict:
@@ -68,6 +180,8 @@ async def list_workspace_tree(
     current_user: User,
     db,
 ) -> dict:
+    if is_public_knowledge_path(path):
+        return await _public_knowledge_tree(path=path, current_user=current_user, db=db)
     backend = _workspace_backend(current_user)
     workspace_path = _workspace_path(path)
     try:
@@ -141,7 +255,11 @@ async def read_workspace_file_bytes(*, path: str, current_user: User) -> tuple[s
     return PurePosixPath(workspace_path).name, content
 
 
-async def read_workspace_file_content(*, path: str, current_user: User) -> dict | StreamingResponse:
+async def read_workspace_file_content(*, path: str, current_user: User, db=None) -> dict | StreamingResponse:
+    if is_public_knowledge_path(path):
+        if db is None:
+            raise HTTPException(status_code=500, detail="公共物料读取缺少数据库上下文")
+        return await _read_public_knowledge_file(path=path, current_user=current_user, db=db)
     backend = _workspace_backend(current_user)
     workspace_path = _workspace_path(path)
     try:
@@ -170,10 +288,10 @@ async def read_workspace_file_content(*, path: str, current_user: User) -> dict 
 
 
 async def write_workspace_file_content(*, path: str, content: str, current_user: User) -> dict:
+    if is_public_knowledge_path(path):
+        raise HTTPException(status_code=403, detail="公共知识物料为只读路径")
     backend = _workspace_backend(current_user)
     workspace_path = _workspace_path(path)
-    if PurePosixPath(workspace_path).suffix.lower() not in EDITABLE_WORKSPACE_SUFFIXES:
-        raise HTTPException(status_code=400, detail="当前文件类型不支持编辑")
 
     try:
         raw_content = await asyncio.to_thread(
@@ -187,13 +305,13 @@ async def write_workspace_file_content(*, path: str, content: str, current_user:
         raise HTTPException(status_code=400, detail="当前路径是目录") from exc
     except (PermissionError, NotADirectoryError, ValueError) as exc:
         raise HTTPException(status_code=403, detail="Access denied") from exc
-    preview_type, supported, _message = detect_preview_type(path, raw_content)
-    if preview_type not in {"markdown", "text"} or not supported:
-        raise HTTPException(status_code=400, detail="当前文件类型不支持编辑")
     try:
         raw_content.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise HTTPException(status_code=400, detail="当前文件不是 UTF-8 文本") from exc
+    preview_type, supported, _message = detect_preview_type(path, raw_content)
+    if preview_type not in {"markdown", "text"} or not supported:
+        raise HTTPException(status_code=400, detail="当前文件不是可编辑的 UTF-8 文本")
 
     try:
         item = await asyncio.to_thread(backend.write_authorized_file, workspace_path, content.encode("utf-8"))
@@ -212,6 +330,8 @@ async def write_workspace_file_content(*, path: str, content: str, current_user:
 
 
 async def delete_workspace_path(*, path: str, current_user: User) -> dict:
+    if is_public_knowledge_path(path):
+        raise HTTPException(status_code=403, detail="公共知识物料为只读路径")
     backend = _workspace_backend(current_user)
     workspace_path = _workspace_path(path)
     if workspace_path == WORKSPACE_SCOPE_ROOT:
@@ -232,6 +352,8 @@ async def delete_workspace_path(*, path: str, current_user: User) -> dict:
 
 
 async def create_workspace_directory(*, parent_path: str, name: str, current_user: User) -> dict:
+    if is_public_knowledge_path(parent_path):
+        raise HTTPException(status_code=403, detail="公共知识物料为只读路径")
     backend = _workspace_backend(current_user)
     directory_name = _validate_child_name(name, field_name="文件夹名")
     virtual_parent = _workspace_path(parent_path)
@@ -255,6 +377,8 @@ async def create_workspace_directory(*, parent_path: str, name: str, current_use
 
 
 async def upload_workspace_files(*, parent_path: str, files: list[UploadFile], current_user: User) -> dict:
+    if is_public_knowledge_path(parent_path):
+        raise HTTPException(status_code=403, detail="公共知识物料为只读路径")
     if not files:
         raise HTTPException(status_code=400, detail="请选择至少一个文件")
     if len(files) > MAX_WORKSPACE_UPLOAD_FILES:
@@ -299,7 +423,19 @@ async def upload_workspace_files(*, parent_path: str, files: list[UploadFile], c
     return {"success": True, "entries": entries}
 
 
-async def download_workspace_file(*, path: str, current_user: User) -> FileResponse:
+async def download_workspace_file(*, path: str, current_user: User, db=None) -> FileResponse | Response:
+    if is_public_knowledge_path(path):
+        if db is None:
+            raise HTTPException(status_code=500, detail="公共物料下载缺少数据库上下文")
+        data = await _read_public_knowledge_file(path=path, current_user=current_user, db=db)
+        if isinstance(data, dict):
+            filename = data.get("filename") or PurePosixPath(path).name or "material.txt"
+            content = data.get("content") or ""
+            if isinstance(content, str):
+                content = content.encode("utf-8")
+            return Response(content=content, media_type="text/plain; charset=utf-8", headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            })
     backend = _workspace_backend(current_user)
     workspace_path = _workspace_path(path)
     file_name = PurePosixPath(workspace_path).name or "download"

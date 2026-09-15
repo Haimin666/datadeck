@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { agentApi, databaseApi, mcpApi, skillApi, toolApi } from '@/apis'
+import { agentApi, knowledgeBaseApi, skillApi, toolApi } from '@/apis'
 import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
 import { isDefaultAllAgentResourceKind } from '@/utils/agentConfigUtils'
 import { handleChatError } from '@/utils/errorHandler'
@@ -26,7 +26,7 @@ function sortAgents(agents) {
 }
 
 function getPreferredAgentId(agents, persistedId) {
-  const chatAgents = agents.filter((agent) => !agent.is_subagent)
+  const chatAgents = agents.filter((agent) => agent.execution_role !== 'subagent')
   if (persistedId && chatAgents.some((agent) => agent.id === persistedId)) return persistedId
   return chatAgents.find(isBuiltinAgent)?.id || chatAgents[0]?.id || null
 }
@@ -43,7 +43,6 @@ export const useAgentStore = defineStore(
     const selectedAgentId = ref(null)
 
     const availableKnowledgeBases = ref([])
-    const availableMcps = ref([])
     const availableSkills = ref([])
     // 完整工具元数据（含 buildin / knowledge 等全部分类的 display_name），用于工具名称展示映射
     const toolMetadata = ref([])
@@ -77,12 +76,8 @@ export const useAgentStore = defineStore(
           delete items[key].x_oap_ui_config
         }
       })
-      if (items.tools && Array.isArray(toolMetadata.value)) {
-        items.tools.options = toolMetadata.value.map((tool) => ({
-          value: tool.slug,
-          name: tool.name,
-          description: tool.description
-        }))
+      if (items.tools) {
+        items.tools.options = (items.tools.options || []).filter((tool) => tool.kind === 'package')
       }
       return items
     })
@@ -96,15 +91,13 @@ export const useAgentStore = defineStore(
       try {
         const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
         await runtimeCapabilitiesStore.ensureLoaded()
-        const [dbsRes, mcpsRes, skillsRes] = await Promise.all([
+        const [dbsRes, skillsRes] = await Promise.all([
           runtimeCapabilitiesStore.knowledgeEnabled
-            ? databaseApi.getAccessibleDatabases().catch(() => ({ databases: [] }))
+            ? knowledgeBaseApi.list().catch(() => ({ databases: [] }))
             : Promise.resolve({ databases: [] }),
-          mcpApi.getMcpServers().catch(() => ({ data: [] })),
           skillApi.listAccessibleSkills().catch(() => ({ data: [] }))
         ])
         availableKnowledgeBases.value = dbsRes.databases || []
-        availableMcps.value = mcpsRes.data || []
         availableSkills.value = skillsRes.data || []
       } catch (e) {
         console.warn('Failed to fetch mention resources:', e)
@@ -114,7 +107,7 @@ export const useAgentStore = defineStore(
     async function fetchToolMetadata() {
       try {
         const result = await toolApi.getTools()
-        toolMetadata.value = result?.data || []
+        toolMetadata.value = result?.items || []
       } catch (e) {
         console.warn('Failed to fetch tool metadata:', e)
         toolMetadata.value = []
@@ -203,13 +196,18 @@ export const useAgentStore = defineStore(
       }
     }
 
+    async function fetchConfigurableItems(backendId = 'ChatbotAgent') {
+      const response = await agentApi.getConfigurableItems(backendId)
+      return response.configurable_items || {}
+    }
+
     async function selectAgent(agentId, { allowSubagent = false } = {}) {
       if (!agentId) return
       let knownAgent = agentDetails.value[agentId] || agents.value.find((a) => a.id === agentId)
       if (!knownAgent) {
         knownAgent = await fetchAgentDetail(agentId)
       }
-      if (knownAgent?.is_subagent && !allowSubagent) return
+      if (knownAgent?.execution_role === 'subagent' && !allowSubagent) return
       isLoadingConfig.value = true
       try {
         const detail = agentDetails.value[agentId] || (await fetchAgentDetail(agentId))
@@ -254,7 +252,7 @@ export const useAgentStore = defineStore(
           created,
           ...agents.value.filter((item) => item.id !== created.id)
         ])
-        if (!created.is_subagent) await selectAgent(created.id)
+        if (created.execution_role !== 'subagent') await selectAgent(created.id)
       }
       return created
     }
@@ -293,7 +291,6 @@ export const useAgentStore = defineStore(
       agents.value = []
       selectedAgentId.value = null
       availableKnowledgeBases.value = []
-      availableMcps.value = []
       availableSkills.value = []
       toolMetadata.value = []
       agentConfig.value = {}
@@ -311,7 +308,6 @@ export const useAgentStore = defineStore(
       agents,
       selectedAgentId,
       availableKnowledgeBases,
-      availableMcps,
       availableSkills,
       toolMetadata,
       agentConfig,
@@ -330,6 +326,7 @@ export const useAgentStore = defineStore(
       initialize,
       fetchAgents,
       fetchAgentDetail,
+      fetchConfigurableItems,
       fetchMentionResources,
       selectAgent,
       saveAgentConfig,

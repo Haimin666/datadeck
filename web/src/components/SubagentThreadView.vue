@@ -239,7 +239,7 @@ const startRunStream = async (runId, afterSeq = '0-0', resetMessages = false) =>
       try {
         const runResponse = await agentApi.getAgentRun(runId)
         if (!disposed) {
-          const status = normalizeRunStatus(runResponse?.run?.status)
+          const status = normalizeRunStatus(runResponse?.status)
           if (isTerminalRunStatus(status)) await loadThread()
           else scheduleReconnect(runId)
         }

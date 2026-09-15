@@ -5,7 +5,7 @@ export { formatMentionToken, mentionTypePrefixMap } from './mention_token.js'
 
 const mentionTypePattern = Object.values(mentionTypePrefixMap).join('|')
 const mentionTokenRegex = new RegExp(
-  `@(${mentionTypePattern}):(?:"((?:\\\\.|[^"\\\\])*)"|(\\S+))`,
+  `@(${mentionTypePattern}):(?:"((?:\\\\.|[^"\\\\])*)"|([^\\s，。！？；：、]+))`,
   'g'
 )
 
@@ -74,13 +74,6 @@ export const buildMentionDisplayLabels = (mention = {}) => {
     setMentionLabel(labels, 'knowledge', kb?.label, label)
     setMentionLabel(labels, 'knowledge', kb?.kb_id, label)
     setMentionLabel(labels, 'knowledge', kb?.value, label)
-  })
-  ;(mention.mcps || []).forEach((mcp) => {
-    const label = mcp?.name || mcp?.label || mcp?.slug || mcp?.id || mcp?.value || ''
-    setMentionLabel(labels, 'mcp', mcp?.slug, label)
-    setMentionLabel(labels, 'mcp', mcp?.id, label)
-    setMentionLabel(labels, 'mcp', mcp?.value, label)
-    setMentionLabel(labels, 'mcp', mcp?.name, label)
   })
   ;(mention.skills || []).forEach((skill) => {
     const label = skill?.name || skill?.label || skill?.slug || skill?.id || skill?.value || ''

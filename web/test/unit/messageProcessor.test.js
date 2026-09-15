@@ -38,3 +38,21 @@ test('交付物只归属于调用 present_artifacts 的对话', () => {
   ])
   assert.deepEqual(MessageProcessor.extractArtifactsFromConversation(laterConversation), [])
 })
+
+test('上下文压缩事件显示为历史时间线中的系统分界消息', () => {
+  const conversations = MessageProcessor.convertServerHistoryToMessages([
+    { type: 'human', content: '第一轮问题' },
+    { type: 'ai', content: '第一轮回答' },
+    {
+      type: 'system',
+      message_type: 'context_compression',
+      content: '上下文已压缩：前面的历史消息仍可查看。'
+    },
+    { type: 'human', content: '第二轮问题' },
+    { type: 'ai', content: '第二轮回答' }
+  ])
+
+  assert.equal(conversations.length, 2)
+  assert.equal(conversations[0].messages[2].type, 'system')
+  assert.match(conversations[0].messages[2].content, /上下文已压缩/)
+})

@@ -14,6 +14,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from datadeck.agents.context import DEFAULT_MAX_EXECUTION_STEPS
 from datadeck.agents.context import BaseContext
+from datadeck.agents.policy import AgentPolicy, CHATBOT_POLICY
 
 from datadeck import logger
 
@@ -30,6 +31,7 @@ class BaseAgent:
     description = "base_agent"
     capabilities: list[str] = []
     context_schema: type[BaseContext] = BaseContext
+    policy: AgentPolicy = CHATBOT_POLICY
 
     def __init__(self, *, checkpointer_provider=None, **kwargs):
         self.graph = None
@@ -83,6 +85,9 @@ class BaseAgent:
         """
         context = self.context_schema()
         context.update_from_dict(input_context or {})
+        # datadeck 核心的 standalone API 不依赖宿主；正式平台运行必须由
+        # AgentRuntimeAssembler 设置 _runtime_prepared 后再调用 get_graph。
+        context._runtime_mode = "standalone"
         graph = await self.get_graph(context=context)
         return await graph.ainvoke(
             {"messages": messages},
@@ -94,6 +99,7 @@ class BaseAgent:
         """值流式：逐轮产出 {messages: [...]}（自 Yuxi stream_values，忠于原样）。"""
         context = self.context_schema()
         context.update_from_dict(input_context or {})
+        context._runtime_mode = "standalone"
         graph = await self.get_graph(context=context)
         async for event in graph.astream(
             {"messages": messages}, stream_mode="values", context=context,
@@ -102,13 +108,14 @@ class BaseAgent:
             yield event["messages"]
 
     async def check_checkpointer(self, app=None) -> bool:
-        app = app or await self.get_graph()
+        app = app or await self.get_graph(metadata_only=True)
         return bool(getattr(app, "checkpointer", None))
 
     async def get_history(self, uid, thread_id) -> list[dict]:
         """经 checkpointer 读取历史；无 checkpointer 返回空。"""
         try:
-            app = await self.get_graph()
+            # 历史读取只需要显式的无用户资源 graph，不能偷偷走正式运行装配。
+            app = await self.get_graph(metadata_only=True)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"get_history: build graph failed: {exc}")
             return []
@@ -134,6 +141,9 @@ class BaseAgent:
     def reload_graph(self) -> None:
         """清空 graph 缓存，下次调用重建。"""
         self.graph = None
+        graph_cache = getattr(self, "_graph_cache", None)
+        if isinstance(graph_cache, dict):
+            graph_cache.clear()
         logger.info(f"{self.name} graph 缓存已清空，下次调用时重新构建")
 
     async def _get_checkpointer(self):

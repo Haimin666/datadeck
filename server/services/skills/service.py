@@ -70,10 +70,10 @@ TEXT_FILE_EXTENSIONS = {
 
 BUILTIN_SKILL_OPERATOR = "builtin-system"
 ADMIN_ROLES = {"admin", "superadmin"}
-DEFAULT_SKILL_SHARE_CONFIG = {"access_level": "user", "department_ids": [], "user_uids": []}
+DEFAULT_SKILL_SHARE_CONFIG = {"access_level": "user", "user_uids": []}
 BUILTIN_SKILL_SHARE_CONFIG = {
     "version": 2,
-    "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
+    "read_scope": {"access_level": "global", "user_uids": []},
     "manage_scope": None,
 }
 SKILL_DRAFT_TTL_SECONDS = 60 * 60
@@ -101,6 +101,8 @@ class ResolvedSkill:
     tool_dependencies: list[str]
     mcp_dependencies: list[str]
     skill_dependencies: list[str]
+    version: str | None = None
+    content_hash: str | None = None
     overrides_shared: bool = False
     shadowed_by_personal: bool = False
 
@@ -118,6 +120,8 @@ class ResolvedSkill:
             "tool_dependencies": self.tool_dependencies,
             "mcp_dependencies": self.mcp_dependencies,
             "skill_dependencies": self.skill_dependencies,
+            "version": self.version,
+            "content_hash": self.content_hash,
             "overrides_shared": self.overrides_shared,
             "shadowed_by_personal": self.shadowed_by_personal,
         }
@@ -182,7 +186,7 @@ def is_builtin_skill(item: Skill | dict) -> bool:
 
 def get_allowed_skill_access_levels(user: User) -> list[str]:
     if user.role in ADMIN_ROLES:
-        return ["global", "department", "user"]
+        return ["global", "user"]
     return ["user"]
 
 
@@ -198,7 +202,6 @@ def normalize_skill_share_config(
 
     default_scope = {
         "access_level": "user",
-        "department_ids": [],
         "user_uids": [operator_uid],
     }
     return normalize_permission_config(
@@ -231,7 +234,7 @@ def can_skill_depend_on(parent: Skill, dependency: Skill) -> bool:
     parent_config = normalize_permission_config(parent.share_config)
     dependency_scopes = [scope for scope in (dep_config["read_scope"], dep_config["manage_scope"]) if scope]
     parent_scopes = [scope for scope in (parent_config["read_scope"], parent_config["manage_scope"]) if scope]
-    owner_scope = {"access_level": "user", "department_ids": [], "user_uids": []}
+    owner_scope = {"access_level": "user", "user_uids": []}
     if not dependency_scopes:
         dependency_scopes = [{**owner_scope, "user_uids": [str(dependency.created_by or "")]}]
     if not parent_scopes:
@@ -251,10 +254,6 @@ def _scope_contains(container: dict, target: dict) -> bool:
         return True
     if target_level == "global" or container_level != target_level:
         return False
-    if target_level == "department":
-        container_ids = {int(value) for value in container.get("department_ids") or []}
-        target_ids = {int(value) for value in target.get("department_ids") or []}
-        return target_ids.issubset(container_ids)
     if target_level == "user":
         container_uids = {str(value) for value in container.get("user_uids") or []}
         target_uids = {str(value) for value in target.get("user_uids") or []}
@@ -630,11 +629,13 @@ async def list_skill_slugs(db: AsyncSession, *, user: User | None = None) -> lis
 async def get_skill_dependency_options(
     db: AsyncSession, user: User, slug: str | None = None
 ) -> dict[str, list[str] | list[dict]]:
-    from datadeck.agents.toolkits.service import get_tool_metadata
+    from datadeck.agents.toolkits.service import get_tool_descriptors
 
     def get_tools():
-        all_tools = get_tool_metadata()
-        return [{"slug": tool["slug"], "name": tool.get("name", tool["slug"])} for tool in all_tools]
+        all_tools = get_tool_descriptors(include_packages=False, include_internal=True)
+        # Skill 依赖声明的是运行时工具成员；它们在 Agent 工具包页面不可单独
+        # 配置，但必须在 Skill 编辑器中可被精确引用。
+        return [{"slug": tool.slug, "name": tool.name} for tool in all_tools]
 
     skill_slugs, tool_list, mcp_names = await asyncio.gather(
         list_skill_slugs(db, user=user),
@@ -670,10 +671,10 @@ async def _list_shared_skill_slugs(db: AsyncSession, user: User) -> list[str]:
 
 def _get_all_tool_names() -> list[str]:
     """获取所有工具名称（包括 buildin 和其他来源）"""
-    from datadeck.agents.toolkits.service import get_tool_metadata
+    from datadeck.agents.toolkits.service import get_tool_descriptors
 
-    all_tools = get_tool_metadata()
-    return [tool["slug"] for tool in all_tools]
+    all_tools = get_tool_descriptors(include_packages=False, include_internal=True)
+    return [tool.slug for tool in all_tools]
 
 
 async def _validate_dependencies(
@@ -859,6 +860,7 @@ def parse_skill_dir_metadata(source_skill_dir: Path) -> dict[str, Any]:
         "slug": parsed_slug,
         "name": parsed_name,
         "description": parsed_desc,
+        "version": str(meta.get("version") or "") or None,
         "tool_dependencies": normalize_string_list(meta.get("tool_dependencies")),
         "mcp_dependencies": normalize_string_list(meta.get("mcp_dependencies")),
         "skill_dependencies": normalize_string_list(meta.get("skill_dependencies")),
@@ -914,18 +916,64 @@ async def install_personal_skill_dir(
 
 
 async def read_personal_skill_file(uid: str, slug: str, relative_path: str) -> dict[str, Any]:
-    """读取个人 Skill 中的文本文件。"""
+    """读取个人 Skill 中的 UTF-8 文件；个人空间不按扩展名限制。"""
     skill_dir = _resolve_personal_skill_dir(_personal_skills_root(uid), slug)
     target, normalized_path = _resolve_relative_path(skill_dir, relative_path)
     if not target.is_file():
         raise ValueError("文件不存在")
-    if not _is_text_path(target):
-        raise ValueError("仅支持读取文本文件")
     try:
         content = target.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("文件编码不支持（仅支持 UTF-8）") from exc
     return {"path": normalized_path, "content": content}
+
+
+async def get_personal_skill_tree(uid: str, slug: str) -> list[dict[str, Any]]:
+    """返回个人 Skill 的完整目录树，包含 scripts/references/assets。"""
+    skill_dir = _resolve_personal_skill_dir(_personal_skills_root(uid), slug)
+    if not skill_dir.is_dir():
+        raise ValueError("个人 Skill 不存在")
+    return _build_tree(skill_dir, skill_dir)
+
+
+async def update_personal_skill_file(uid: str, slug: str, relative_path: str, content: str) -> None:
+    """编辑当前用户个人 Skill 中的 UTF-8 文件；个人空间不按扩展名限制。"""
+    skill_dir = _resolve_personal_skill_dir(_personal_skills_root(uid), slug)
+    target, _ = _resolve_relative_path(skill_dir, relative_path)
+    if not target.is_file():
+        raise ValueError("文件不存在")
+    if target.name == "SKILL.md" and target.parent == skill_dir:
+        parsed_slug, _, _, _ = _parse_skill_markdown(content)
+        if parsed_slug != slug:
+            raise ValueError("SKILL.md frontmatter.slug 必须与 Skill slug 一致")
+    target.write_text(content, encoding="utf-8")
+
+
+async def create_personal_skill_node(uid: str, slug: str, relative_path: str, is_dir: bool, content: str | None) -> None:
+    """在个人 Skill 内创建文件或目录。"""
+    skill_dir = _resolve_personal_skill_dir(_personal_skills_root(uid), slug)
+    target, _ = _resolve_relative_path(skill_dir, relative_path)
+    if target.exists():
+        raise ValueError("目标已存在")
+    if is_dir:
+        target.mkdir(parents=True, exist_ok=False)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content or "", encoding="utf-8")
+
+
+async def delete_personal_skill_node(uid: str, slug: str, relative_path: str) -> None:
+    """删除个人 Skill 内的文件或目录。"""
+    skill_dir = _resolve_personal_skill_dir(_personal_skills_root(uid), slug)
+    target, normalized_path = _resolve_relative_path(skill_dir, relative_path, allow_root=False)
+    if normalized_path == "SKILL.md":
+        raise ValueError("不允许删除根目录 SKILL.md")
+    if not target.exists():
+        raise ValueError("目标不存在")
+    if target.is_dir():
+        await asyncio.to_thread(shutil.rmtree, target)
+    else:
+        target.unlink()
 
 
 async def delete_personal_skill(uid: str, slug: str) -> None:
@@ -999,12 +1047,14 @@ def _resolved_shared_skill(item: Skill, *, shadowed_by_personal: bool = False) -
         tool_dependencies=normalize_string_list(item.tool_dependencies),
         mcp_dependencies=normalize_string_list(item.mcp_dependencies),
         skill_dependencies=normalize_string_list(item.skill_dependencies),
+        version=item.version,
+        content_hash=item.content_hash,
         shadowed_by_personal=shadowed_by_personal,
     )
 
 
 def _resolved_personal_skill(uid: str, root: Path, metadata: dict[str, Any]) -> ResolvedSkill:
-    """将个人目录元数据适配为不含共享语义的有效 Skill 描述。"""
+    """将个人目录元数据适配为有效 Skill 描述。"""
     slug = str(metadata["slug"])
     if not is_valid_skill_slug(slug):
         raise ValueError("个人 Skill 包含非法 slug")
@@ -1020,9 +1070,10 @@ def _resolved_personal_skill(uid: str, root: Path, metadata: dict[str, Any]) -> 
         enabled=True,
         created_by=uid,
         share_config=None,
-        tool_dependencies=[],
-        mcp_dependencies=[],
-        skill_dependencies=[],
+        tool_dependencies=normalize_string_list(metadata.get("tool_dependencies")),
+        mcp_dependencies=normalize_string_list(metadata.get("mcp_dependencies")),
+        skill_dependencies=normalize_string_list(metadata.get("skill_dependencies")),
+        version=str(metadata.get("version") or "") or None,
     )
 
 
@@ -1175,7 +1226,8 @@ async def prepare_skill_upload(
 ) -> dict[str, Any]:
     normalized_filename = filename.lower()
     is_zip_upload = normalized_filename.endswith(".zip")
-    is_skill_md_upload = normalized_filename.endswith("skill.md")
+    # 上传入口已明确允许 .md；落盘时统一命名为根级 SKILL.md。
+    is_skill_md_upload = normalized_filename.endswith(".md")
     if not is_zip_upload and not is_skill_md_upload:
         raise ValueError("仅支持上传 .zip 或 SKILL.md 文件")
 
@@ -1372,7 +1424,11 @@ async def confirm_personal_skill_install_draft(
     operator: User,
 ) -> list[dict[str, Any]]:
     """确认草稿并将选中 Skill 安装到当前用户个人持久源。"""
-    draft_dir, _data, draft_items = _load_and_select_draft_items(draft_id, slugs, operator)
+    draft_dir, data, draft_items = _load_and_select_draft_items(draft_id, slugs, operator)
+    # 管理员可以代确认共享 Skill 草稿，但个人 Skill 必须由草稿创建者本人确认。
+    # 否则管理员确认他人的草稿时，会把内容写入管理员自己的个人目录。
+    if str(data.get("created_by") or "") != str(operator.uid):
+        raise ValueError("无权将该安装草稿写入当前用户的个人 Skill")
 
     results: list[dict[str, Any]] = []
     for draft_item in draft_items:

@@ -6,16 +6,17 @@ services:
     image: datadeck:latest
     restart: unless-stopped
     env_file:
+      - path: .env
+        required: false
       - path: .env.docker
         required: false
     environment:
       DATADECK_DATA_ROOT: /app/data
-      DATABASE_URL: postgresql+asyncpg://datadeck:${POSTGRES_PASSWORD:-datadeck_password}@postgres:5432/datadeck
-      DATADECK_SQL_DSN: postgresql://datadeck:${POSTGRES_PASSWORD:-datadeck_password}@postgres:5432/datadeck
+      DATABASE_URL: postgresql+asyncpg://datadeck:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/datadeck
       DATADECK_QDRANT_URL: http://qdrant:6333
       DATADECK_REDIS_URL: redis://redis:6379/0
     ports:
-      - "${DATADECK_PORT:-8000}:8000"
+      - "${DATADECK_BIND_ADDRESS:-0.0.0.0}:${DATADECK_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -25,8 +26,9 @@ services:
         condition: service_healthy
     volumes:
       - ./data:/app/data:Z
+      - ./data_material:/app/data_material:ro,Z
+      - ./data/temp-sessions:/tmp/datadeck-sessions:Z
       - ./uploads:/app/uploads:Z
-      - ./server/uploads:/app/server/uploads:Z
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/system/health', timeout=3)\""]
       interval: 10s
@@ -42,10 +44,10 @@ services:
     environment:
       POSTGRES_DB: datadeck
       POSTGRES_USER: datadeck
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-datadeck_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       PGDATA: /var/lib/postgresql/data/pgdata
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - datadeck-postgres:/var/lib/postgresql/data
     healthcheck:
@@ -59,7 +61,7 @@ services:
     image: docker.m.daocloud.io/qdrant/qdrant:latest
     restart: unless-stopped
     ports:
-      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_BIND_ADDRESS:-127.0.0.1}:${QDRANT_PORT:-6333}:6333"
     volumes:
       - datadeck-qdrant:/qdrant/storage
     healthcheck:

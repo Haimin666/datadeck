@@ -50,6 +50,9 @@
         <span class="config-dropdown-item-label">{{ group.label }}</span>
         <ChevronRight :size="14" class="attachment-options-chevron" />
       </button>
+      <div v-if="!fileUploadEnabled && !hasMentionResources" class="attachment-options-empty">
+        暂无可添加内容
+      </div>
     </template>
 
     <template v-else>

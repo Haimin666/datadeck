@@ -23,6 +23,11 @@ def merge_data_workflow(existing: dict | None, new: dict | None) -> dict:
     return merged
 
 
+def merge_string_list(existing: list[str] | None, new: list[str] | None) -> list[str]:
+    """合并运行时字符串状态并去重，供 Skill 动态激活使用。"""
+    return list(dict.fromkeys([*(existing or []), *(new or [])]))
+
+
 class BaseState(AgentState):
     """Shared state fields for datadeck agents."""
 
@@ -31,6 +36,7 @@ class BaseState(AgentState):
     sql_turn_base: int            # SqlSelfCheckMiddleware：本轮消息基线索引
     sql_validation: dict | None   # SqlSelfCheckMiddleware：最终验证状态
     data_workflow: Annotated[dict, merge_data_workflow]  # DataWorkflowMiddleware：数据工具前置条件
+    activated_skills: Annotated[list[str], merge_string_list]
 
 
 class AgentStatePayload(TypedDict):

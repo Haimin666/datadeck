@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .context import ChatBotContext
-from .graph import ChatbotAgent, sync_agent_context_skills
+from .graph import ChatbotAgent
 from .state import ChatBotState
 
-__all__ = ["ChatBotContext", "ChatBotState", "ChatbotAgent", "sync_agent_context_skills"]
+__all__ = ["ChatBotContext", "ChatBotState", "ChatbotAgent"]

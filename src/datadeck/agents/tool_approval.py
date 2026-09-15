@@ -16,7 +16,7 @@ ToolApprovalMode = Literal["default", "always_trust", "none"]
 DEFAULT_TOOL_APPROVAL_MODE: ToolApprovalMode = "default"
 TOOL_APPROVAL_MODES = frozenset({"default", "always_trust", "none"})
 SENSITIVE_BACKEND_TOOLS = frozenset({
-    "write_file", "edit_file", "execute", "workspace_write_file",
+    "write_file", "edit_file", "execute", "run_skill_script", "workspace_write_file",
     "scheduled_task_create", "scheduled_task_update", "scheduled_task_delete",
     "subagent_start", "subagent_orchestrate", "subagent_cancel",
 })
@@ -46,6 +46,7 @@ def create_tool_approval_middleware(
             "write_file": {"allowed_decisions": _ALLOWED_DECISIONS, "when": write_requires_approval},
             "edit_file": {"allowed_decisions": _ALLOWED_DECISIONS, "when": write_requires_approval},
             "execute": {"allowed_decisions": _ALLOWED_DECISIONS},
+            "run_skill_script": {"allowed_decisions": _ALLOWED_DECISIONS},
             "workspace_write_file": {"allowed_decisions": _ALLOWED_DECISIONS},
             "scheduled_task_create": {"allowed_decisions": _ALLOWED_DECISIONS},
             "scheduled_task_update": {"allowed_decisions": _ALLOWED_DECISIONS},

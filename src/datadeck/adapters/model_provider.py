@@ -23,6 +23,7 @@ class EnvModelProvider(ModelProvider):
             model=model_id,
             base_url=os.getenv("DATADECK_BASE_URL", ""),
             api_key=os.getenv("DATADECK_API_KEY", ""),
+            proxy_url=os.getenv("DATADECK_MODEL_HTTP_PROXY", ""),
             temperature=float(os.getenv("DATADECK_MODEL_TEMPERATURE", "0.0") or 0.0),
         )
 

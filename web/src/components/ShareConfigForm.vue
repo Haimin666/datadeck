@@ -59,7 +59,7 @@
                     <a-button
                       size="small"
                       class="select-action lucide-icon-btn"
-                      :aria-label="option.value === 'department' ? '选择部门' : '选择用户'"
+                      aria-label="选择用户"
                       :disabled="disabled"
                     >
                       <UserPlus class="select-action-icon" :size="14" />
@@ -72,7 +72,7 @@
                         <div class="selection-dropdown-header">
                           <div class="selection-dropdown-title">
                             {{ scope.key === 'manage_scope' ? '可管理' : '可读取'
-                            }}{{ option.value === 'department' ? '部门' : '用户' }}
+                            }}用户
                           </div>
                           <div class="selection-dropdown-subtitle">
                             {{ getAccessSummary(scope.key, option.value) }}
@@ -83,7 +83,7 @@
                           size="small"
                           allow-clear
                           class="selection-search"
-                          :placeholder="option.value === 'department' ? '搜索部门' : '搜索用户'"
+                          placeholder="搜索用户"
                           @mousedown.stop
                           @click.stop
                         />
@@ -167,12 +167,11 @@
 
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
-import { Building2, Globe, Users, UserPlus } from '@lucide/vue'
+import { Globe, Users, UserPlus } from '@lucide/vue'
 import { useUserStore } from '@/stores/user'
 import { authApi } from '@/apis/auth_api'
 
 const userStore = useUserStore()
-const departments = ref([])
 const users = ref([])
 const syncingFromProps = ref(false)
 
@@ -182,11 +181,11 @@ const props = defineProps({
     required: true,
     default: () => ({
       version: 2,
-      read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
+      read_scope: { access_level: 'global', user_uids: [] },
       manage_scope: null
     })
   },
-  autoSelectUserDept: { type: Boolean, default: false },
+  autoSelectCurrentUser: { type: Boolean, default: false },
   disabled: { type: Boolean, default: false },
   disabledReason: { type: String, default: '' },
   requireReadScope: { type: Boolean, default: false },
@@ -205,28 +204,19 @@ const scopeOptions = [
 
 const baseShareModeOptions = [
   { value: 'global', title: '全局共享', description: '所有用户都可以访问', icon: Globe },
-  {
-    value: 'department',
-    title: '部门共享',
-    description: '选中的部门成员可以访问',
-    icon: Building2
-  },
   { value: 'user', title: '指定人', description: '选中的用户可以访问', icon: Users }
 ]
 
 const scopes = reactive({ read_scope: null, manage_scope: null })
 const selectionSearch = reactive({
-  read_scope: { department: '', user: '' },
-  manage_scope: { department: '', user: '' }
+  read_scope: { user: '' },
+  manage_scope: { user: '' }
 })
 
-const currentDepartmentId = computed(() =>
-  userStore.departmentId ? Number(userStore.departmentId) : null
-)
 const currentUserUid = computed(() => userStore.uid || '')
 const normalizedAllowedAccessLevels = computed(() => {
   const allowed = props.allowedAccessLevels.filter((level) =>
-    ['global', 'department', 'user'].includes(level)
+    ['global', 'user'].includes(level)
   )
   return allowed.length ? allowed : ['global']
 })
@@ -238,9 +228,6 @@ const shareModeOptions = computed(() =>
 
 const createScope = (scope) => ({
   access_level: scope?.access_level || 'global',
-  department_ids: Array.from(
-    new Set((scope?.department_ids || []).map(Number).filter(Number.isFinite))
-  ),
   user_uids: Array.from(
     new Set((scope?.user_uids || []).map((uid) => String(uid).trim()).filter(Boolean))
   )
@@ -253,19 +240,8 @@ const normalizeScope = (scope, { includeCurrent = false } = {}) => {
     normalized.access_level = normalizedAllowedAccessLevels.value[0]
   }
   if (normalized.access_level === 'global') {
-    normalized.department_ids = []
     normalized.user_uids = []
-  } else if (normalized.access_level === 'department') {
-    normalized.user_uids = []
-    if (
-      includeCurrent &&
-      currentDepartmentId.value &&
-      !normalized.department_ids.includes(currentDepartmentId.value)
-    ) {
-      normalized.department_ids.unshift(currentDepartmentId.value)
-    }
   } else {
-    normalized.department_ids = []
     if (
       includeCurrent &&
       currentUserUid.value &&
@@ -286,9 +262,6 @@ const isManageScopeWithinRead = (manageScope, readScope = scopes.read_scope) => 
       manageScope.user_uids.every((uid) => readScope.user_uids.includes(uid))
     )
   }
-  if (manageScope.access_level === 'department') {
-    return manageScope.department_ids.every((id) => readScope.department_ids.includes(id))
-  }
   return true
 }
 
@@ -297,7 +270,7 @@ const initConfig = () => {
   const source = props.modelValue || {}
   const isV2 = source.version === 2
   const readScope = isV2 ? source.read_scope : source
-  scopes.read_scope = normalizeScope(readScope, { includeCurrent: props.autoSelectUserDept })
+  scopes.read_scope = normalizeScope(readScope, { includeCurrent: props.autoSelectCurrentUser })
   scopes.manage_scope = normalizeScope(isV2 ? source.manage_scope : null)
   const hadMissingRequiredRead = props.requireReadScope && !scopes.read_scope
   if (hadMissingRequiredRead) {
@@ -334,38 +307,29 @@ const setAccessLevel = (scopeKey, accessLevel) => {
     return
   scopes[scopeKey].access_level = accessLevel
   scopes[scopeKey] = normalizeScope(scopes[scopeKey], {
-    includeCurrent: scopeKey === 'read_scope' && props.autoSelectUserDept
+    includeCurrent: scopeKey === 'read_scope' && props.autoSelectCurrentUser
   })
 }
 
-const departmentOptions = computed(() =>
-  departments.value.map((dept) => ({
-    label: dept.name,
-    value: Number(dept.id)
-  }))
-)
 const userOptions = computed(() =>
   users.value.map((user) => ({
     label: user.department_name ? `${user.username}（${user.department_name}）` : user.username,
-    value: user.uid,
-    department_id: user.department_id
+    value: user.uid
   }))
 )
 
 const getAccessCount = (scopeKey, accessLevel) => {
   const scope = scopes[scopeKey]
-  if (accessLevel === 'department') return scope?.department_ids.length || 0
   if (accessLevel === 'user') return scope?.user_uids.length || 0
   return ''
 }
 const getAccessSummary = (scopeKey, accessLevel) => {
   const scope = scopes[scopeKey]
   if (accessLevel === 'global') return '所有用户可访问'
-  if (accessLevel === 'department') return `${scope?.department_ids.length || 0} 个部门可访问`
   return `${scope?.user_uids.length || 0} 个用户可访问`
 }
 const getSelectionOptions = (scopeKey, accessLevel) => {
-  let options = accessLevel === 'department' ? departmentOptions.value : userOptions.value
+  const options = userOptions.value
 
   const query = selectionSearch[scopeKey][accessLevel].trim().toLowerCase()
   return query ? options.filter((item) => item.label.toLowerCase().includes(query)) : options
@@ -373,30 +337,18 @@ const getSelectionOptions = (scopeKey, accessLevel) => {
 const isSelected = (scopeKey, accessLevel, value) => {
   const scope = scopes[scopeKey]
   if (!scope) return false
-  return accessLevel === 'department'
-    ? scope.department_ids.includes(Number(value))
-    : scope.user_uids.includes(String(value))
+  return scope.user_uids.includes(String(value))
 }
 const toggleSelection = (scopeKey, accessLevel, value, checked) => {
   if (props.disabled || !scopes[scopeKey]) return
   const scope = scopes[scopeKey]
-  if (accessLevel === 'department') {
-    scope.department_ids = Array.from(
-      new Set(
-        checked
-          ? [...scope.department_ids, Number(value)]
-          : scope.department_ids.filter((id) => id !== Number(value))
-      )
+  scope.user_uids = Array.from(
+    new Set(
+      checked
+        ? [...scope.user_uids, String(value)]
+        : scope.user_uids.filter((uid) => uid !== String(value))
     )
-  } else {
-    scope.user_uids = Array.from(
-      new Set(
-        checked
-          ? [...scope.user_uids, String(value)]
-          : scope.user_uids.filter((uid) => uid !== String(value))
-      )
-    )
-  }
+  )
 }
 
 const loadUsers = async () => {
@@ -419,9 +371,6 @@ watch(
 
 const validateScope = (scope, title) => {
   if (!scope || scope.access_level === 'global') return { valid: true, message: '' }
-  if (scope.access_level === 'department' && !scope.department_ids.length) {
-    return { valid: false, message: `${title}至少需要选择一个部门` }
-  }
   if (scope.access_level === 'user' && !scope.user_uids.length) {
     return { valid: false, message: `${title}至少需要选择一个用户` }
   }
@@ -484,7 +433,7 @@ defineExpose({ scopes, validate })
 
 .share-mode-cards {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 

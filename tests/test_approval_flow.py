@@ -36,7 +36,7 @@ def _wait_status(client, run_id: str, headers: dict, targets, timeout_s=10) -> d
     run = {}
     while time.time() < deadline:
         r = client.get(f"/api/agent/runs/{run_id}", headers=headers)
-        run = r.json()["run"]
+        run = r.json()
         if run["status"] in targets:
             return run
         time.sleep(0.3)
@@ -77,7 +77,7 @@ class TestApprovalInterruptResume:
         run = app_client.post("/api/agent/runs",
                               json={"query": "请调用 echo", "agent_slug": "default-chatbot",
                                     "thread_id": th},
-                              headers=headers).json()["run"]
+                              headers=headers).json()
 
         # 1. interrupt：run → interrupted + human_approval_required 事件落库
         final = _wait_status(app_client, run["id"], headers, {"interrupted"})
@@ -100,7 +100,7 @@ class TestApprovalInterruptResume:
                                           "tool_approval": {"approved": True}},
                                     headers=headers)
         assert resume_res.status_code == 200, resume_res.text
-        assert resume_res.json()["run"]["id"] == run["id"], "resume 应复用原 run"
+        assert resume_res.json()["id"] == run["id"], "resume 应复用原 run"
 
         final2 = _wait_status(app_client, run["id"], headers, {"completed"})
         assert final2["status"] == "completed"
@@ -120,7 +120,7 @@ class TestApprovalInterruptResume:
         run = app_client.post("/api/agent/runs",
                               json={"query": "调用 echo", "agent_slug": "default-chatbot",
                                     "thread_id": th},
-                              headers=headers).json()["run"]
+                              headers=headers).json()
         _wait_status(app_client, run["id"], headers, {"interrupted"})
 
         resume_res = app_client.post("/api/agent/runs",
@@ -155,7 +155,96 @@ class TestApprovalInterruptResume:
         run = app_client.post("/api/agent/runs",
                               json={"query": "hi", "agent_slug": "default-chatbot",
                                     "thread_id": th},
-                              headers=headers).json()["run"]
+                              headers=headers).json()
         _wait_status(app_client, run["id"], headers, {"completed"})
         res = app_client.post(f"/api/agent/runs/{run['id']}/cancel", headers=headers)
         assert res.status_code == 409
+
+    def test_cancel_waiting_approval(self, app_client, approval_on_echo, scripted_model):
+        scripted_model.reset(script=[{
+            "content": "", "tool_calls": [
+                {"name": "echo", "args": {"text": "待审批"}, "id": "call_cancel",
+                 "type": "tool_call"},
+            ],
+        }])
+
+        headers = _login(app_client)
+        th = app_client.post(
+            "/api/chat/thread", json={"agent_id": "default-chatbot"}, headers=headers,
+        ).json()["id"]
+        run = app_client.post(
+            "/api/agent/runs",
+            json={"query": "调用 echo", "agent_slug": "default-chatbot", "thread_id": th},
+            headers=headers,
+        ).json()
+        _wait_status(app_client, run["id"], headers, {"interrupted"})
+
+        cancelled = app_client.post(
+            f"/api/agent/runs/{run['id']}/cancel", headers=headers,
+        )
+        assert cancelled.status_code == 200, cancelled.text
+        assert cancelled.json()["status"] == "cancelled"
+
+    def test_resume_must_match_thread_and_agent(self, app_client, approval_on_echo, scripted_model):
+        scripted_model.reset(script=[{
+            "content": "", "tool_calls": [
+                {"name": "echo", "args": {"text": "隔离"}, "id": "call_mismatch",
+                 "type": "tool_call"},
+            ],
+        }])
+
+        headers = _login(app_client)
+        th1 = app_client.post(
+            "/api/chat/thread", json={"agent_id": "default-chatbot"}, headers=headers,
+        ).json()["id"]
+        th2 = app_client.post(
+            "/api/chat/thread", json={"agent_id": "default-chatbot"}, headers=headers,
+        ).json()["id"]
+        run = app_client.post(
+            "/api/agent/runs",
+            json={"query": "调用 echo", "agent_slug": "default-chatbot", "thread_id": th1},
+            headers=headers,
+        ).json()
+        _wait_status(app_client, run["id"], headers, {"interrupted"})
+
+        resumed = app_client.post(
+            "/api/agent/runs",
+            json={
+                "query": "", "agent_slug": "default-chatbot", "thread_id": th2,
+                "resume": run["id"], "tool_approval": {"approved": True},
+            },
+            headers=headers,
+        )
+        assert resumed.status_code == 409, resumed.text
+
+    def test_resume_requires_explicit_decision(self, app_client, approval_on_echo, scripted_model):
+        scripted_model.reset(script=[{
+            "content": "", "tool_calls": [
+                {"name": "echo", "args": {"text": "明确决定"}, "id": "call_decision",
+                 "type": "tool_call"},
+            ],
+        }])
+
+        headers = _login(app_client)
+        th = app_client.post(
+            "/api/chat/thread", json={"agent_id": "default-chatbot"}, headers=headers,
+        ).json()["id"]
+        run = app_client.post(
+            "/api/agent/runs",
+            json={"query": "调用 echo", "agent_slug": "default-chatbot", "thread_id": th},
+            headers=headers,
+        ).json()
+        _wait_status(app_client, run["id"], headers, {"interrupted"})
+
+        resumed = app_client.post(
+            "/api/agent/runs",
+            json={"query": "", "agent_slug": "default-chatbot", "thread_id": th,
+                  "resume": run["id"]},
+            headers=headers,
+        )
+        assert resumed.status_code == 422, resumed.text
+
+        cancelled = app_client.post(
+            f"/api/agent/runs/{run['id']}/cancel", headers=headers,
+        )
+        assert cancelled.status_code == 200, cancelled.text

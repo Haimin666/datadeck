@@ -1,7 +1,5 @@
 """SqlValidator（确定性只读 SQL 校验器）单元测试。"""
 
-import pytest
-
 from datadeck.agents.sql_guard import validate_sql
 
 
@@ -118,3 +116,27 @@ class TestStructure:
         if not r.ok and r.issues:
             item = r.issues[0].to_payload()
             assert set(item.keys()) == {"code", "message"}
+
+
+class TestDatasourcePolicy:
+    def test_denied_table_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("DATADECK_SQL_DENIED_TABLES", "secret.users")
+        result = validate_sql("SELECT id FROM secret.users", dialect="doris")
+        assert not result.ok
+        assert any(item.code == "SQL_TABLE_DENIED" for item in result.issues)
+
+    def test_allowed_schema_is_required_when_configured(self, monkeypatch):
+        monkeypatch.setenv("DATADECK_SQL_ALLOWED_SCHEMAS", "reporting")
+        result = validate_sql("SELECT id FROM secret.users", dialect="doris")
+        assert not result.ok
+        assert any(item.code == "SQL_SCHEMA_NOT_ALLOWED" for item in result.issues)
+
+    def test_denied_column_and_wildcard_are_rejected(self, monkeypatch):
+        monkeypatch.setenv("DATADECK_SQL_DENIED_COLUMNS", "users.phone")
+        result = validate_sql("SELECT phone FROM users", dialect="doris")
+        assert not result.ok
+        assert any(item.code == "SQL_COLUMN_DENIED" for item in result.issues)
+
+        wildcard = validate_sql("SELECT * FROM users", dialect="doris")
+        assert not wildcard.ok
+        assert any(item.code == "SQL_COLUMN_DENIED" for item in wildcard.issues)

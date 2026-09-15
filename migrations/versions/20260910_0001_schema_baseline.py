@@ -19,13 +19,9 @@ def upgrade() -> None:
     """Create every missing table and align columns added before Alembic adoption."""
     from server.models import Base
 
-    # Register models declared outside server.models before create_all runs.
-    # SystemConfig/UserConfig now live in server.models; keep the remaining
-    # legacy module imports until those tables are moved into the model package.
-    from server.services.attachment_service import ThreadAttachment  # noqa: F401
-    from server.services.eval_service import EvaluationCase, EvaluationRun  # noqa: F401
-    from server.services.metric_registry import MetricRegistry  # noqa: F401
-    from server.services.pg_memory_store import AgentMemory  # noqa: F401
+    # Import the single model registry before create_all runs.  Runtime services
+    # contain behavior only; they must not be imported to register ORM tables.
+    import server.models  # noqa: F401
 
     bind = op.get_bind()
     Base.metadata.create_all(bind=bind)

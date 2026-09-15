@@ -89,70 +89,22 @@
     </template>
 
     <!-- 服务链接部分 -->
-    <div v-if="userStore.isAdmin" class="section-title">服务链接</div>
+    <div v-if="userStore.isAdmin" class="section-title">系统链接</div>
     <div v-if="userStore.isAdmin">
       <p class="section-description">
-        快速访问系统相关的外部服务，需要将 localhost 替换为实际的 IP 地址。
+        地址会自动使用当前访问域名，适用于本地与 Docker 部署环境。
       </p>
       <div class="services-grid">
-        <div class="service-link-card">
+        <div v-for="service in serviceLinks" :key="service.name" class="service-link-card">
           <div class="service-info">
-            <h4>Neo4j 浏览器</h4>
-            <p>图数据库管理界面</p>
+            <h4>{{ service.name }}</h4>
+            <p>{{ service.description }}</p>
+            <code class="service-url">{{ service.url }}</code>
           </div>
-          <a-button
-            type="default"
-            class="lucide-icon-btn"
-            @click="openLink('http://localhost:7474/')"
-            :icon="h(Globe, { size: 18 })"
-          >
-            访问
-          </a-button>
-        </div>
-
-        <div class="service-link-card">
-          <div class="service-info">
-            <h4>API 接口文档</h4>
-            <p>系统接口文档和调试工具</p>
-          </div>
-          <a-button
-            type="default"
-            class="lucide-icon-btn"
-            @click="openLink('http://localhost:5050/docs')"
-            :icon="h(Globe, { size: 18 })"
-          >
-            访问
-          </a-button>
-        </div>
-
-        <div class="service-link-card">
-          <div class="service-info">
-            <h4>MinIO 对象存储</h4>
-            <p>文件存储管理控制台</p>
-          </div>
-          <a-button
-            type="default"
-            class="lucide-icon-btn"
-            @click="openLink('http://localhost:9001')"
-            :icon="h(Globe, { size: 18 })"
-          >
-            访问
-          </a-button>
-        </div>
-
-        <div class="service-link-card">
-          <div class="service-info">
-            <h4>Milvus WebUI</h4>
-            <p>向量数据库管理界面</p>
-          </div>
-          <a-button
-            type="default"
-            class="lucide-icon-btn"
-            @click="openLink('http://localhost:9091/webui/')"
-            :icon="h(Globe, { size: 18 })"
-          >
-            访问
-          </a-button>
+          <a-space>
+            <a-button type="default" class="lucide-icon-btn" @click="copyLink(service.url)" :icon="h(Copy, { size: 16 })">复制</a-button>
+            <a-button type="default" class="lucide-icon-btn" @click="openLink(service.url)" :icon="h(Globe, { size: 18 })">访问</a-button>
+          </a-space>
         </div>
       </div>
     </div>
@@ -161,9 +113,10 @@
 
 <script setup>
 import { computed, h } from 'vue'
+import { message } from 'ant-design-vue'
 import { useConfigStore } from '@/stores/config'
 import { useUserStore } from '@/stores/user'
-import { Globe } from '@lucide/vue'
+import { Copy, Globe } from '@lucide/vue'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import EmbeddingModelSelector from '@/components/EmbeddingModelSelector.vue'
 import RerankModelSelector from '@/components/RerankModelSelector.vue'
@@ -172,6 +125,12 @@ import SkillSettingsSection from '@/components/SkillSettingsSection.vue'
 const configStore = useConfigStore()
 const userStore = useUserStore()
 const items = computed(() => configStore.config?._config_items || {})
+const appOrigin = window.location.origin
+const serviceLinks = [
+  { name: 'API 接口文档', description: '查看并调试 DataDeck 的 API 接口。', url: `${appOrigin}/docs` },
+  { name: 'OpenAPI 定义', description: '供 API 客户端或网关导入的 OpenAPI JSON。', url: `${appOrigin}/openapi.json` },
+  { name: '服务健康检查', description: '确认应用服务当前是否可用。', url: `${appOrigin}/api/system/health` }
+]
 const handleChange = (key, e) => {
   configStore.setConfigValue(key, e)
 }
@@ -196,6 +155,11 @@ const handleContentGuardModelSelect = (spec) => {
 
 const openLink = (url) => {
   window.open(url, '_blank')
+}
+
+const copyLink = async (url) => {
+  await navigator.clipboard.writeText(url)
+  message.success('链接已复制')
 }
 </script>
 
@@ -322,6 +286,14 @@ const openLink = (url) => {
         color: var(--gray-600);
         font-size: 13px;
         line-height: 1.4;
+      }
+
+      .service-url {
+        display: block;
+        margin-top: 6px;
+        color: var(--gray-500);
+        font-size: 12px;
+        overflow-wrap: anywhere;
       }
     }
   }

@@ -22,6 +22,7 @@ web/dist/
 .env
 .env.local
 .env.*.local
+.env.docker
 
 # Logs
 *.log
@@ -58,6 +59,7 @@ uploads/
 .ruff_cache/
 .pytest_cache/
 data/
+tmp/local-runtime/
 
 # 架构图生成产物（源为 .architecture.json）
 docs/architecture/*.html

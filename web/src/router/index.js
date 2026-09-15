@@ -39,16 +39,10 @@ const router = createRouter({
       component: AppLayout,
       children: [
         {
-          path: '',
+          path: ':thread_id?',
           name: 'AgentComp',
           component: () => import('../views/AgentView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
-        },
-        {
-          path: ':thread_id',
-          name: 'AgentCompWithThreadId',
-          component: () => import('../views/AgentView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          meta: { keepAlive: true, requiresAuth: true, requiredModule: 'conversations' }
         }
       ]
     },
@@ -61,7 +55,7 @@ const router = createRouter({
           path: '',
           name: 'WorkspaceComp',
           component: () => import('../views/WorkspaceView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          meta: { keepAlive: true, requiresAuth: true, requiredModule: 'workspace' }
         }
       ]
     },
@@ -74,19 +68,13 @@ const router = createRouter({
           path: '',
           name: 'KnowledgeComp',
           component: () => import('../views/KnowledgeView.vue'),
-          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+          meta: { keepAlive: false, requiresAuth: true, requiredModule: 'knowledge' }
         },
         {
           path: ':kbId',
           name: 'KnowledgeBaseDetail',
-          component: () => import('../views/DataBaseInfoView.vue'),
-          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true, requiresKnowledge: true }
-        },
-        {
-          path: ':kbId/evaluation/:datasetId',
-          name: 'KnowledgeEvaluationBenchmarkDetail',
-          component: () => import('../views/EvaluationBenchmarkDetailView.vue'),
-          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true, requiresKnowledge: true }
+          component: () => import('../views/KnowledgeView.vue'),
+          meta: { keepAlive: false, requiresAuth: true, requiredModule: 'knowledge', requiresKnowledge: true }
         }
       ]
     },
@@ -98,7 +86,7 @@ const router = createRouter({
         path: '',
         name: 'ScheduledTasksComp',
         component: () => import('../views/ScheduledTasksView.vue'),
-        meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+        meta: { keepAlive: false, requiresAuth: true, requiredModule: 'scheduled_tasks' }
       }]
     },
     {
@@ -109,8 +97,13 @@ const router = createRouter({
         path: '',
         name: 'MetricsComp',
         component: () => import('../views/MetricRegistryView.vue'),
-        meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+        meta: { keepAlive: false, requiresAuth: true, requiredModule: 'metrics' }
       }]
+    },
+    {
+      path: '/rag-materials',
+      redirect: { path: '/knowledge', query: { tab: 'materials' } },
+      meta: { requiresAuth: true, requiredModule: 'knowledge' }
     },
     {
       path: '/dashboard',
@@ -134,7 +127,7 @@ const router = createRouter({
           path: '',
           name: 'AgentManageComp',
           component: () => import('../views/AgentManageView.vue'),
-          meta: { keepAlive: false, requiresAuth: true }
+          meta: { keepAlive: false, requiresAuth: true, requiredModule: 'agents' }
         }
       ]
     },
@@ -153,23 +146,13 @@ const router = createRouter({
           },
           children: [
             {
-              path: 'knowledgebase/:kbId',
-              name: 'ExtensionKnowledgeBaseDetail',
-              redirect: (to) => ({ name: 'KnowledgeBaseDetail', params: { kbId: to.params.kbId }, query: to.query })
-            },
-            {
-              path: 'knowledgebase/:kbId/evaluation/:datasetId',
-              name: 'ExtensionEvaluationBenchmarkDetail',
-              redirect: (to) => ({ name: 'KnowledgeEvaluationBenchmarkDetail', params: to.params, query: to.query })
-            },
-            {
               path: 'mcp/:slug',
               name: 'ExtensionMcpDetail',
               component: () => import('../components/extensions/McpDetailView.vue'),
               meta: {
                 keepAlive: false,
                 requiresAuth: true,
-                requiresAdmin: true
+                requiredModule: 'extensions'
               }
             },
             {
@@ -201,6 +184,7 @@ router.beforeEach(async (to) => {
   const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin)
   const requiresSuperAdmin = to.matched.some((record) => record.meta.requiresSuperAdmin)
   const requiresKnowledge = to.matched.some((record) => record.meta.requiresKnowledge)
+  const requiredModules = to.matched.map((record) => record.meta.requiredModule).filter(Boolean)
 
   const userStore = useUserStore()
   const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
@@ -233,6 +217,10 @@ router.beforeEach(async (to) => {
     // 保存尝试访问的路径，登录后跳转
     sessionStorage.setItem('redirect', to.fullPath)
     return '/login'
+  }
+
+  if (requiredModules.some((module) => !userStore.canAccess(module))) {
+    return '/agent'
   }
 
   // 如果路由需要管理员权限但用户不是管理员
