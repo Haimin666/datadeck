@@ -5,6 +5,9 @@ datadeck.ports.CheckpointerProvider 注入——src/datadeck 不感知 PG。
 """
 from __future__ import annotations
 
+import asyncio
+import sys
+
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from datadeck.adapters.platform_model_provider import PlatformModelProvider
@@ -18,6 +21,7 @@ from server.services.model_providers.cache import model_cache
 # （线程内多轮记忆 + interrupt 恢复）。
 _saver_cm = None
 _saver = None
+_saver_lock = asyncio.Lock()
 _agent: ChatbotAgent | None = None
 _data_agent: DataAgent | None = None
 
@@ -36,12 +40,21 @@ async def _init_saver() -> AsyncPostgresSaver:
     global _saver_cm, _saver
     if _saver is not None:
         return _saver
-    # AsyncPostgresSaver 吃 psycopg 连接串（无 +asyncpg driver 前缀）
-    dsn = settings.database_url.replace("+asyncpg", "")
-    _saver_cm = AsyncPostgresSaver.from_conn_string(dsn)
-    _saver = await _saver_cm.__aenter__()
-    await _saver.setup()
-    return _saver
+    async with _saver_lock:
+        if _saver is not None:
+            return _saver
+        # AsyncPostgresSaver 吃 psycopg 连接串（无 +asyncpg driver 前缀）
+        dsn = settings.database_url.replace("+asyncpg", "")
+        saver_cm = AsyncPostgresSaver.from_conn_string(dsn)
+        saver = await saver_cm.__aenter__()
+        try:
+            await saver.setup()
+        except BaseException:
+            await saver_cm.__aexit__(*sys.exc_info())
+            raise
+        _saver_cm = saver_cm
+        _saver = saver
+        return saver
 
 
 async def get_chatbot_agent() -> ChatbotAgent:
