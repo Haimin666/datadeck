@@ -294,14 +294,10 @@ async def get_thread_history(
     if not t:
         return {"history": []}
 
-    agent = await _get_thread_agent(db, t)
-    if agent is None:
-        return {"history": []}
-    raw = await agent.get_history(current_user.uid, thread_id)
-
     # SummarizationMiddleware 会在 checkpoint 中用摘要替换旧消息；checkpoint
     # 只服务 Agent 上下文，不能作为用户历史的唯一来源。run_events 保留了每轮
-    # 请求和流式回复，因此优先从事件账本恢复完整可见历史。
+    # 请求和流式回复，因此优先从事件账本恢复完整可见历史。先查事件账本，
+    # 避免每次打开历史都装配完整 Agent 和检查点连接。
     event_rows = await db.execute(sa_text(
         "SELECT r.id, r.request_id, r.input_payload, r.created_at, "
         "e.seq, e.event_type, e.payload, e.created_at "
@@ -310,6 +306,7 @@ async def get_thread_history(
         "ORDER BY r.created_at ASC, e.seq ASC"
     ), {"tid": thread_id, "uid": current_user.uid})
     persisted = event_rows.fetchall()
+    raw: list[dict] = []
     if persisted:
         rebuilt: list[dict] = []
         current_run = None
@@ -364,6 +361,11 @@ async def get_thread_history(
         flush_assistant()
         if rebuilt:
             raw = rebuilt
+    else:
+        # 兼容没有事件账本的旧线程：仅在确实没有持久化事件时读取 checkpoint。
+        agent = await _get_thread_agent(db, t)
+        if agent is not None:
+            raw = await agent.get_history(current_user.uid, thread_id)
 
     messages = []
     for m in raw:
