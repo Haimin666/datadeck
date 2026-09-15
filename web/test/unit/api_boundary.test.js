@@ -248,12 +248,11 @@ test('用户管理分页 API 只请求当前页并编码服务端筛选条件', 
       offset: 40,
       limit: 20,
       search: '张 三',
-      departmentId: 3,
       role: 'admin'
     })
 
     assert.deepEqual(requests, [
-      '/api/auth/users/page?offset=40&limit=20&search=%E5%BC%A0+%E4%B8%89&department_id=3&role=admin'
+      '/api/auth/users/page?offset=40&limit=20&search=%E5%BC%A0+%E4%B8%89&role=admin'
     ])
     assert.equal(page.total, 0)
   })

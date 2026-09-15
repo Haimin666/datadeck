@@ -51,25 +51,48 @@ def _decode(filename: str, content: bytes) -> str:
     return content.decode("utf-8-sig")
 
 
-async def list_knowledge_bases(db: AsyncSession, uid: str) -> list[dict]:
+async def list_knowledge_bases(
+    db: AsyncSession,
+    uid: str,
+    *,
+    allowed_ids: set[str] | None = None,
+) -> list[dict]:
+    configured_ids = {str(item).strip() for item in (allowed_ids or set()) if str(item).strip()}
+    access_filter = or_(
+        KnowledgeBase.uid == uid,
+        KnowledgeBase.access_scope.in_(("shared", "public")),
+        KnowledgeBase.id.in_(configured_ids) if configured_ids else False,
+    )
     rows = (await db.execute(
         select(KnowledgeBase, func.count(KnowledgeDocument.id))
         .outerjoin(KnowledgeDocument, and_(
             KnowledgeDocument.kb_id == KnowledgeBase.id,
             KnowledgeDocument.source_type.in_(BUSINESS_SOURCE_TYPES),
         ))
-        .where(or_(KnowledgeBase.uid == uid, KnowledgeBase.access_scope.in_(("shared", "public"))))
+        .where(access_filter)
         .group_by(KnowledgeBase.id)
         .order_by(KnowledgeBase.updated_at.desc())
     )).all()
     return [item.to_dict(document_count=count) for item, count in rows]
 
 
-async def get_knowledge_base(db: AsyncSession, uid: str, kb_id: str) -> KnowledgeBase:
+async def get_knowledge_base(
+    db: AsyncSession,
+    uid: str,
+    kb_id: str,
+    *,
+    authorized_ids: set[str] | None = None,
+) -> KnowledgeBase:
+    explicit_ids = {str(item).strip() for item in (authorized_ids or set()) if str(item).strip()}
+    access_filter = or_(
+        KnowledgeBase.uid == uid,
+        KnowledgeBase.access_scope.in_(("shared", "public")),
+        KnowledgeBase.id.in_(explicit_ids) if explicit_ids else False,
+    )
     item = (await db.execute(
         select(KnowledgeBase).where(
             KnowledgeBase.id == kb_id,
-            or_(KnowledgeBase.uid == uid, KnowledgeBase.access_scope.in_(("shared", "public"))),
+            access_filter,
         )
     )).scalar_one_or_none()
     if item is None:
@@ -109,7 +132,10 @@ async def rebuild_rag_indexes(db: AsyncSession) -> int:
     )).all()
     repaired = 0
     for document, knowledge_base in document_rows:
-        if document.source_type not in BUSINESS_SOURCE_TYPES:
+        # 早期手工创建的文档可能没有 source_type；按普通上传文档处理，
+        # 否则启动修复会跳过它并留下损坏的切片。
+        source_type = document.source_type or "upload"
+        if source_type not in BUSINESS_SOURCE_TYPES:
             # 原始物料不进入默认 RAG；代码和 OMD 由专用入口/工具读取。
             continue
         chunks = _chunks(document.content or "")
@@ -340,8 +366,16 @@ async def delete_knowledge_base(db: AsyncSession, uid: str, kb_id: str) -> None:
     await db.delete(kb)
 
 
-async def search(db: AsyncSession, uid: str, kb_id: str, query: str, top_k: int = 5) -> dict:
-    kb = await get_knowledge_base(db, uid, kb_id)
+async def search(
+    db: AsyncSession,
+    uid: str,
+    kb_id: str,
+    query: str,
+    top_k: int = 5,
+    *,
+    authorized_kb_ids: set[str] | None = None,
+) -> dict:
+    kb = await get_knowledge_base(db, uid, kb_id, authorized_ids=authorized_kb_ids)
     query = query.strip()
     if not query:
         raise ValueError("检索内容不能为空")

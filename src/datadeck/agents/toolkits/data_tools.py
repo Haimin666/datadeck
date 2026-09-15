@@ -4,6 +4,7 @@
 # rag_store 仅服务 datadeck 的独立 standalone 调用，不是平台事实存储。
 
 import asyncio as _asyncio
+from typing import Literal
 
 from datadeck.agents.toolkits.registry import tool
 
@@ -31,18 +32,47 @@ async def sql_execute_query(sql: str) -> dict:
 # ── OMD 元数据 ────────────────────────────────────────────
 
 @tool(category="data", tags=["元数据", "表结构", "Service"], display_name="列出库与 Schema",
-      description="列出 OMD Token 可见的全部数据库类 Service、数据库和 Schema；可传 service_name 限定 Service。")
-async def omd_list_databases(service_name: str = "") -> dict:
-    """List databases across all visible OpenMetadata database services."""
+      description="列出 OMD Token 可见的数据库 Service、数据库和 Schema；数据库类型支持 Hive、Doris、Mysql、Oracle。")
+async def omd_list_databases(
+    service_name: str = "",
+    service_type: Literal["", "Hive", "Doris", "Mysql", "Oracle"] = "",
+) -> dict:
+    """列出数据库类 Service 下的数据库和 Schema。
+
+    service_type 只能是 Hive、Doris、Mysql、Oracle；Looker 和 CustomDashboard
+    是看板类 Service，不能用于数据库/Schema 查询。
+    """
     from datadeck.agents.toolkits.omd_client import list_databases, list_schemas
 
     from datadeck.agents.toolkits.circuit_breaker import aguard
 
-    dbs = await aguard("omd_list_databases", lambda: _sync(list_databases, service_name or None))
+    dbs = await aguard("omd_list_databases", lambda: _sync(
+        list_databases, service_name or None, service_type or None))
     if dbs.get("ok") and service_name:
-        schemas = await aguard("omd_list_databases", lambda: _sync(list_schemas, None, service_name))
+        schemas = await aguard("omd_list_databases", lambda: _sync(
+            list_schemas, None, service_name))
         dbs["schemas"] = schemas.get("schemas", []) if schemas.get("ok") else []
     return dbs
+
+
+@tool(category="data", tags=["元数据", "Service", "Hive", "Doris", "Mysql", "Oracle", "Looker", "CustomDashboard"], display_name="列出 OMD Service",
+      description="列出当前 Token 可见的数据库和看板 Service；支持 Hive、Doris、Mysql、Oracle、Looker、CustomDashboard，可按 service_type 筛选。返回 service_category 和 service_type。")
+async def omd_list_services(
+    service_type: Literal[
+        "", "Hive", "Doris", "Mysql", "Oracle", "Looker", "CustomDashboard",
+    ] = "",
+) -> dict:
+    """列出当前 Token 可见的 OMD Service。
+
+    六类 Service Type：Hive、Doris、Mysql、Oracle（数据库类），以及
+    Looker、CustomDashboard（看板类）。返回 Service 名称、真实类型和类别；
+    不传类型时返回全部六类。
+    """
+    from datadeck.agents.toolkits.circuit_breaker import aguard
+    from datadeck.agents.toolkits.omd_client import list_services
+
+    return await aguard("omd_list_services", lambda: _sync(
+        list_services, service_type or None))
 
 
 @tool(category="data", tags=["元数据", "表清单"], display_name="列出 Schema 下的表",
@@ -61,19 +91,24 @@ async def omd_list_tables(schema_name: str, service_name: str = "", database_nam
 
 
 @tool(category="data", tags=["元数据", "表搜索", "Service"], display_name="搜索表",
-      description="跨全部可见 OMD Service 搜索表。用户只给表名、未给 Service/数据库/Schema 时必须优先使用。"
+      description="跨 Hive/Doris/Mysql/Oracle Service 搜索表。用户只给表名、未给 Service/数据库/Schema 时必须优先使用。"
                   "命中多个候选时，先把候选返回给用户确认，禁止猜测默认 Service。")
 async def omd_search_tables(
     table_name: str, service_name: str = "", database_name: str = "",
     schema_name: str = "", limit: int = 20,
+    service_type: Literal["", "Hive", "Doris", "Mysql", "Oracle"] = "",
 ) -> dict:
-    """Search tables across all visible OpenMetadata database services."""
+    """跨数据库类 Service 搜索表。
+
+    支持 Hive、Doris、Mysql、Oracle；Looker 和 CustomDashboard 不能作为表搜索
+    数据源。未给 Service 时必须先让用户从命中候选中确认真实 Service。
+    """
     from datadeck.agents.toolkits.circuit_breaker import aguard
     from datadeck.agents.toolkits.omd_client import search_tables
 
     return await aguard("omd_search_tables", lambda: _sync(
         search_tables, table_name, service_name or None, database_name or None,
-        schema_name or None, limit))
+        schema_name or None, limit, service_type or None))
 
 
 @tool(category="data", tags=["元数据", "表结构", "Text2SQL"], display_name="查询表结构",

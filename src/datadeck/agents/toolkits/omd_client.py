@@ -5,6 +5,8 @@ env 配置（未配置时工具返回占位提示，不影响链路）：
 - OMD_TOKEN:    Bearer xxx
 - OMD_SERVICE:  默认 数仓Doris
 - OMD_DATABASE: 默认 default
+
+支持的 Service Type：Hive、Doris、Mysql、Oracle、Looker、CustomDashboard（也接受常用中文别名）。
 """
 
 from __future__ import annotations
@@ -60,23 +62,79 @@ def omd_configured() -> bool:
     return bool(omd_base_url() and omd_token())
 
 
-def list_services() -> dict[str, Any]:
-    """列出当前 OMD Token 可见的全部数据库类 Service。"""
+DATABASE_SERVICE_TYPES = ("Hive", "Doris", "Mysql", "Oracle")
+DASHBOARD_SERVICE_TYPES = ("Looker", "CustomDashboard")
+SUPPORTED_SERVICE_TYPES = DATABASE_SERVICE_TYPES + DASHBOARD_SERVICE_TYPES
+SERVICE_ENDPOINTS = {
+    "database": "/services/databaseServices",
+    "dashboard": "/services/dashboardServices",
+}
+
+
+def normalize_service_type(value: str | None) -> str | None:
+    """规范化 OMD Service Type；空值表示不筛选。"""
+    normalized = str(value or "").strip().lower().replace(" ", "")
+    aliases = {
+        "hive": "Hive", "数仓hive": "Hive",
+        "doris": "Doris", "数仓doris": "Doris",
+        "mysql": "Mysql", "数仓mysql": "Mysql",
+        "oracle": "Oracle", "数仓oracle": "Oracle",
+        "looker": "Looker", "看板": "Looker",
+        "customdashboard": "CustomDashboard", "custom dashboard": "CustomDashboard",
+        "自定义看板": "CustomDashboard", "帆软": "CustomDashboard",
+    }
+    if not normalized:
+        return None
+    return aliases.get(normalized)
+
+
+def _service_type_matches(actual: str, expected: str | None) -> bool:
+    normalized = str(actual or "").strip().lower().replace(" ", "")
+    if expected is None:
+        supported = {item.lower() for item in SUPPORTED_SERVICE_TYPES}
+        return normalized in supported | {f"数仓{item.lower()}" for item in supported}
+    return normalized in {expected.lower(), f"数仓{expected.lower()}"}
+
+
+def list_services(
+    service_type: str | None = None,
+    service_category: str | None = None,
+) -> dict[str, Any]:
+    """列出当前 OMD Token 可见的数据库类和看板类 Service。"""
+    requested_type = normalize_service_type(service_type)
+    if service_type and requested_type is None:
+        return {"ok": False, "error": "service_type 仅支持 Hive、Doris、Mysql、Oracle、Looker、CustomDashboard"}
+    category = str(service_category or "").strip().lower() or None
+    if category not in {None, *SERVICE_ENDPOINTS}:
+        return {"ok": False, "error": "service_category 仅支持 database 或 dashboard"}
     if not omd_configured():
         return _placeholder("列出 Service")
-    data = _api_get("/services/databaseServices?limit=500")
-    if not data:
-        return {"ok": False, "error": "OpenMetadata Service 查询失败（token 可能过期）"}
-    services = [
-        {
-            "name": item.get("name", ""),
-            "fqn": item.get("fullyQualifiedName", ""),
-            "service_type": item.get("serviceType", ""),
-        }
-        for item in data.get("data", [])
-        if item.get("name")
-    ]
-    return {"ok": True, "services": services}
+    services = []
+    failed_categories = []
+    endpoints = {category: SERVICE_ENDPOINTS[category]} if category else SERVICE_ENDPOINTS
+    for service_kind, endpoint in endpoints.items():
+        data = _api_get(f"{endpoint}?limit=500")
+        if not data:
+            failed_categories.append(service_kind)
+            continue
+        services.extend(
+            {
+                "name": item.get("name", ""),
+                "fqn": item.get("fullyQualifiedName", ""),
+                "service_type": item.get("serviceType", ""),
+                "service_category": service_kind,
+            }
+            for item in data.get("data", [])
+            if item.get("name") and _service_type_matches(item.get("serviceType", ""), requested_type)
+        )
+    return {
+        "ok": bool(services) or not failed_categories,
+        "service_type": requested_type,
+        "service_category": category,
+        "supported_service_types": list(SUPPORTED_SERVICE_TYPES),
+        "failed_categories": failed_categories,
+        "services": services,
+    }
 
 
 def _run_async_query(factory: Callable[[], Coroutine[Any, Any, list]]) -> list | None:
@@ -173,7 +231,15 @@ def _pg_fallback(action: str) -> dict[str, Any] | None:
         return None
 
 
-def list_databases(service: str | None = None) -> dict[str, Any]:
+def list_databases(
+    service: str | None = None,
+    service_type: str | None = None,
+) -> dict[str, Any]:
+    requested_type = normalize_service_type(service_type)
+    if service_type and requested_type is None:
+        return {"ok": False, "error": "service_type 仅支持 Hive、Doris、Mysql、Oracle、Looker、CustomDashboard"}
+    if requested_type and requested_type not in DATABASE_SERVICE_TYPES:
+        return {"ok": False, "error": "列数据库只支持数据库类 Service：Hive、Doris、Mysql、Oracle"}
     if not omd_configured():
         fb = _pg_fallback("databases")
         if fb:
@@ -181,7 +247,9 @@ def list_databases(service: str | None = None) -> dict[str, Any]:
         return _placeholder("列出数据库")
     selected = str(service or "").strip()
     services = [selected] if selected else [
-        item["name"] for item in list_services().get("services", [])
+        item["name"] for item in list_services(
+            requested_type, service_category="database",
+        ).get("services", [])
     ]
     if not services:
         services = [omd_service()]
@@ -198,10 +266,13 @@ def list_databases(service: str | None = None) -> dict[str, Any]:
             "name": item.get("name", ""),
             "fqn": item.get("fullyQualifiedName", ""),
             "service": service_name,
+            "service_type": requested_type or "",
         } for item in data.get("data", []) if item.get("name"))
     return {
         "ok": bool(databases) or not failed,
         "services": services,
+        "service_type": requested_type,
+        "supported_service_types": list(SUPPORTED_SERVICE_TYPES),
         "databases": databases,
         "failed_services": failed,
     }
@@ -262,11 +333,17 @@ def search_tables(
     database: str | None = None,
     schema: str | None = None,
     limit: int = 20,
+    service_type: str | None = None,
 ) -> dict[str, Any]:
     """跨 OMD 可见 Service 搜索表，避免在缺少上下文时猜测默认库。"""
     query = str(table_name or "").strip()
     if not query:
         return {"ok": False, "error": "table_name 不能为空"}
+    requested_type = normalize_service_type(service_type)
+    if service_type and requested_type is None:
+        return {"ok": False, "error": "service_type 仅支持 Hive、Doris、Mysql、Oracle、Looker、CustomDashboard"}
+    if requested_type and requested_type not in DATABASE_SERVICE_TYPES:
+        return {"ok": False, "error": "搜索数据表只支持数据库类 Service：Hive、Doris、Mysql、Oracle"}
     if not omd_configured():
         return _placeholder("搜索表")
 
@@ -285,6 +362,14 @@ def search_tables(
     if isinstance(raw_hits, dict):
         raw_hits = raw_hits.get("hits") or raw_hits.get("data") or []
     candidates: list[dict[str, Any]] = []
+    service_types: dict[str, str] = {}
+    if requested_type:
+        service_types = {
+            str(item["name"]): str(item.get("service_type") or "")
+            for item in list_services(
+                requested_type, service_category="database",
+            ).get("services", [])
+        }
     for hit in raw_hits if isinstance(raw_hits, list) else []:
         source = hit.get("_source") or hit.get("entity") or hit
         fqn = str(source.get("fullyQualifiedName") or source.get("fqn") or "")
@@ -297,7 +382,13 @@ def search_tables(
             "schema": source.get("schemaName") or (parts[-2] if len(parts) >= 4 else ""),
             "description": (source.get("description") or "")[:200],
         }
+        item["service_type"] = (
+            source.get("serviceType")
+            or service_types.get(item["service"], "")
+        )
         if service and item["service"] != service:
+            continue
+        if requested_type and not _service_type_matches(item["service_type"], requested_type):
             continue
         if database and item["database"] != database:
             continue
@@ -305,7 +396,13 @@ def search_tables(
             continue
         if item["name"]:
             candidates.append(item)
-    return {"ok": True, "query": query, "total": len(candidates), "candidates": candidates}
+    return {
+        "ok": True,
+        "query": query,
+        "service_type": requested_type,
+        "total": len(candidates),
+        "candidates": candidates,
+    }
 
 
 def _pg_fallback_tables(schema: str) -> dict[str, Any] | None:

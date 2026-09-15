@@ -89,9 +89,6 @@
                     <span>{{ getRoleDisplayName(record.role) }}</span>
                   </span>
                 </template>
-                <template v-if="column.key === 'department'">
-                  <span class="dept-text">{{ record.department_name || '-' }}</span>
-                </template>
                 <template v-if="column.key === 'phone'">
                   <span class="phone-text">{{ record.phone_number || '-' }}</span>
                 </template>
@@ -246,10 +243,9 @@ const availableRoles = ref([])
 const columns = [
   { title: '用户', key: 'user', width: '26%' },
   { title: '角色', dataIndex: 'role', key: 'role', width: '16%' },
-  { title: '所属部门', dataIndex: 'department_name', key: 'department', width: '18%' },
-  { title: '手机号', dataIndex: 'phone_number', key: 'phone', width: '16%' },
-  { title: '最后登录', dataIndex: 'last_login', key: 'lastLogin', width: '14%' },
-  { title: '操作', key: 'action', width: '10%', align: 'center' }
+  { title: '手机号', dataIndex: 'phone_number', key: 'phone', width: '20%' },
+  { title: '最后登录', dataIndex: 'last_login', key: 'lastLogin', width: '18%' },
+  { title: '操作', key: 'action', width: '12%', align: 'center' }
 ]
 
 const getRoleDisplayName = (role) => {
@@ -414,7 +410,7 @@ const handlePageChange = (page, pageSize) => {
   fetchUsers()
 }
 
-// 刷新用户和部门信息
+// 刷新用户信息
 const handleRefresh = async () => {
   if (userManagement.refreshing) return
   userManagement.refreshing = true

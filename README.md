@@ -8,6 +8,8 @@ DataDeck 是一个面向企业数据问答的 Agent 平台，包含通用对话 
 
 - `default-chatbot`：通用对话 Agent，保持通用问答和工具扩展能力。
 - `data-agent`：内置数据分析 Agent，默认加载 RAG、OMD 和只读 SQL 工具，并开启 SQL 自检。
+- 两个内置 Agent 都固定挂载 `package:platform`（文件、Skill、定时任务、追问和产物等平台能力）；该能力包在编辑器中可见但不可移除。
+- OMD Service 查询区分数据库类（Hive、Doris、Mysql、Oracle）和看板类（Looker、CustomDashboard）；数据库/表搜索不会把看板 Service 当作数据源。
 - 知识库：支持 TXT、Markdown、CSV、JSON；按文档切片，持久化到 PostgreSQL，启动时恢复 chunk 并按需补齐 Qdrant 向量索引，未配置 embedding 时使用关键词检索。
 - Agent 绑定：Agent 配置中的 `knowledges` 绑定用户知识库；运行时校验用户归属并注入对应 collection。
 - 运行状态：Agent run、事件流、审批、错误和重启恢复均落库；运行中 Run 通过数据库心跳续租，多副本不会互相误回收，失联 Run 会自动收敛为失败。
@@ -37,7 +39,7 @@ RULES.md                      项目开发与运行规则
 ```bash
 # 首次部署：自动检查 Docker、创建挂载目录并生成 .env.docker
 ./docker-manage.sh init
-# 编辑 .env.docker，至少配置模型供应商；需要向量检索时配置 embedding key
+# 编辑 .env.docker，至少配置模型供应商；JWT 和 PostgreSQL 密码已由 init 自动生成；需要向量检索时配置 embedding key
 ./docker-manage.sh up
 ./docker-manage.sh status
 curl http://127.0.0.1:8000/api/system/health
@@ -109,6 +111,8 @@ RAG → OMD 元数据 → SQL 只读查询 → 结果回答
 
 DataAgent 仍允许加载 Skill、MCP、工作区等宿主能力，但数据工具包由策略固定挂载，不能通过普通工具白名单移除；通用 Agent 不会自动获得数据工具。
 
+角色权限与 Agent 能力是两层边界：角色权限只决定前端模块和模块级 API 是否可见；用户被角色分配某个 Agent 后，该 Agent 已配置的工具包、Skill、MCP、知识库、工作区和定时任务能力由运行时统一装配，不再被用户是否打开对应管理模块重复限制。Agent 身份提示词默认为空，能力说明只根据本次实际挂载资源生成。
+
 ## Agent 架构与运行时装配
 
 当前 Agent 采用“核心图 + 宿主装配”的分层结构：
@@ -134,7 +138,7 @@ LangGraph create_agent
 
 `src/datadeck` 是 Agent 核心层，负责 Context、Graph、Middleware 和工具注册接口；`server` 是宿主层，负责数据库、用户权限、工作区、Skill、MCP、知识库和定时任务。PG Checkpointer、模型供应商和平台工具通过宿主适配器注入核心层。统一资源契约定义在 [agent_runtime_contract.py](server/services/agent_runtime_contract.py)，统一装配入口定义在 [agent_runtime_assembler.py](server/services/agent_runtime_assembler.py)。
 
-角色的模块权限在装配器内解析为本次运行的不可变快照：无权限的资源不查询、不挂载，工具实例化后还会进行一次服务端权限过滤；因此前端隐藏模块不是安全边界。
+角色的模块权限和 Agent 授权在装配器内解析为本次运行的不可变快照：模块权限控制管理 API，Agent 授权控制其运行资源；工具实例化后还会进行一次服务端权限过滤，因此前端隐藏模块不是安全边界。没有 `workspace` 模块权限的用户只能创建临时会话，不绑定项目；临时目录按配置周期清理。
 
 当前资源挂载方式：
 
@@ -142,13 +146,15 @@ LangGraph create_agent
 |---|---|
 | 内置工具 | 代码注册，按 `context.tools`/能力包选择；DataAgent 的数据工具由 `DATA_AGENT_POLICY` 固定保留 |
 | 工作区工具 | 当前用户工作目录授权后动态创建 |
-| 知识库 | `AgentRuntimeAssembler` 校验用户后注入全部授权 collection；RAG 运行时按快照限制范围 |
+| 知识库 | `AgentRuntimeAssembler` 按用户可访问范围和 Agent 明确配置注入 collection；RAG 运行时按快照限制范围，前端 `@` 候选与快照一致 |
 | 对话附件 | 线程附件先按 `thread_id + uid` 过滤后进入本次 Runtime Context，由 `read_attachment` 能力包读取文本；不向模型暴露磁盘路径 |
 | Skill | 按用户/Agent 配置动态解析，提示词和依赖工具按需激活；声明 `run_skill_script` 后只能执行该 Skill `scripts/` 下的 `.py/.sh`，`/outputs` 自动映射到当前 Workdir |
 | MCP | 以 `package:mcp:<server_slug>` 动态工具包挂载；Skill 依赖由装配器自动补齐，工具只能来自已挂载 Server |
 | 定时任务工具 | 宿主侧注入，只有选择 `package:platform` 或明确配置后可见，调用后创建新的 AgentRun |
-| 子 Agent 工具 | 宿主侧注入，创建独立 Thread/Run，限制单层派生 |
+| 子 Agent 工具 | 宿主侧注入，创建独立 Thread/Run，限制单层派生；父 Agent 显式挂载后不要求用户重复分配子 Agent |
 | 用户追问 | `ask_user_question` 通过 LangGraph interrupt 暂停，前端可按同一 `run_id` 恢复 |
+
+通用 Agent 只注入中性基础提示和实际能力摘要；DataAgent 才注入数据问题工作流。通用 Agent 只有同时挂载 `dba` Skill 与 `run_skill_script` 时，才可以介绍或执行数据同步能力。
 
 正式 AgentRun 必须先经过 `AgentRuntimeAssembler` 生成用户级 `RuntimeResourceSnapshot`；内置工具、知识库、Skill、MCP、工作区、定时任务和子 Agent 的授权边界以该快照为准。装配快照和运行期间的资源诊断会作为 `runtime_snapshot`/`runtime_diagnostic` 事件落库并进入对话 Trace。正式运行不复用绑定了上一轮上下文的 Graph；只有明确的无用户元信息场景可以使用无运行 Graph。详见 [TODO.md](TODO.md) 的 1～8 阶段。
 

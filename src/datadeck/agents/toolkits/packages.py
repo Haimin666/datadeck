@@ -38,7 +38,7 @@ TOOL_PACKAGES: dict[str, dict] = {
         "name": "OMD 元数据",
         "description": "库、表、字段、描述和血缘查询能力。",
         "group": "capability",
-        "tools": ("omd_list_databases", "omd_search_tables", "omd_list_tables", "omd_get_table_schema", "omd_get_table_lineage"),
+        "tools": ("omd_list_services", "omd_list_databases", "omd_search_tables", "omd_list_tables", "omd_get_table_schema", "omd_get_table_lineage"),
     },
     "package:knowledge": {
         "name": "知识库检索",

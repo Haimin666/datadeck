@@ -113,6 +113,15 @@ class BaseContext:
         metadata={"name": "系统提示词", "description": "追加到内置 prompt 之后的自定义系统提示", "type": "text"},
     )
 
+    identity_prompt: str = field(
+        default="",
+        metadata={
+            "name": "Agent 身份",
+            "description": "可选的 Agent 身份描述；留空时不主动声明固定身份或能力",
+            "type": "text",
+        },
+    )
+
     tools: list[str] | None = field(
         default=None,
         metadata={"name": "工具", "description": "启用的工具 slug 列表，None 表示全部可用", "type": "list", "kind": "tools"},

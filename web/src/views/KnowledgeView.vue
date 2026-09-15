@@ -67,13 +67,19 @@ import RagMaterialsView from '@/views/RagMaterialsView.vue'
 
 const databases = ref([]); const selected = ref(null); const documents = ref([]); const selectedId = ref(); const search = ref('')
 const route = useRoute(); const router = useRouter()
-const activeTab = ref(route.query.tab === 'materials' ? 'materials' : 'libraries')
+const KNOWLEDGE_TABS = new Set(['libraries', 'materials', 'repositories'])
+const normalizeTab = (value) => KNOWLEDGE_TABS.has(value) ? value : 'libraries'
+const activeTab = ref(normalizeTab(route.query.tab))
 const knowledgeTabs = [{ key: 'libraries', label: '知识库' }, { key: 'materials', label: 'RAG 物料' }, { key: 'repositories', label: '代码仓库' }]
 watch(activeTab, (tab) => {
   const query = { ...route.query }
   if (tab === 'libraries') delete query.tab
   else query.tab = tab
   router.replace({ query })
+})
+watch(() => route.query.tab, (tab) => {
+  const normalized = normalizeTab(tab)
+  if (normalized !== activeTab.value) activeTab.value = normalized
 })
 const loading = ref(false); const uploading = ref(false); const querying = ref(false); const query = ref(''); const queryResult = ref(null); const showCreate = ref(false); const creating = ref(false)
 const deletingDatabase = ref(false)

@@ -18,3 +18,10 @@ test('知识库前端只暴露统一基础文本 API', () => {
   assert.match(source, /export const scheduledTaskApi/)
   assert.doesNotMatch(source, /export const (databaseApi|documentApi|fileApi|evaluationApi|mindmapApi|graphBuildApi)/)
 })
+
+test('知识库代码仓库 Tab 刷新后保持当前路由状态', () => {
+  const source = readSource('../../src/views/KnowledgeView.vue')
+  assert.match(source, /KNOWLEDGE_TABS = new Set\(\['libraries', 'materials', 'repositories'\]\)/)
+  assert.match(source, /normalizeTab\(route\.query\.tab\)/)
+  assert.match(source, /watch\(\(\) => route\.query\.tab,/)
+})

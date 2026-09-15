@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.db import get_db
-from server.deps import get_required_user, require_agent_access
+from server.deps import get_required_user, get_role_permissions, require_agent_access
 from server.models import User, Thread, Agent, MessageFeedback, Project
 from server.services import attachment_service as att
 from server.services.project_service import create_implicit_project
@@ -69,18 +69,23 @@ async def create_thread(
         raise HTTPException(status_code=404, detail="智能体不存在")
     await require_agent_access(db, current_user, target_agent.slug)
 
+    # 项目属于 workspace 模块。没有该模块权限的用户只能创建临时会话，
+    # 即使前端或旧客户端提交了 project_id 也不能把它带入线程。
+    role_permissions = await get_role_permissions(db, current_user.role)
+    project_id = body.project_id if "workspace" in role_permissions else None
+
     project = None
-    if body.project_id:
+    if project_id:
         project = await db.scalar(
             sa_select(Project).where(
-                Project.id == body.project_id,
+                Project.id == project_id,
                 Project.uid == current_user.uid,
                 Project.status == "active",
             )
         )
         if project is None:
             raise HTTPException(status_code=404, detail="Project 不存在")
-    else:
+    elif "workspace" in role_permissions:
         project = await create_implicit_project(uid=current_user.uid, db=db)
 
     thread_id = str(uuid.uuid4())
@@ -90,7 +95,7 @@ async def create_thread(
         request_id=body.request_id,
         agent_id=body.agent_id,
         title=body.title or "新的对话",
-        project_id=project.id,
+        project_id=project.id if project else None,
         extra_metadata=body.metadata or {},
     )
     db.add(t)
@@ -109,7 +114,7 @@ async def create_thread(
         if existing is None:
             raise
         return existing.to_dict()
-    if project.directory_mode == "managed":
+    if project and project.directory_mode == "managed":
         # 主动物化会话 Workdir（供后续 workspace/project 功能）。目录不可写/暂不可用
         # 不应阻断会话创建——真正使用该 Workdir 的路径会再次尝试并显式报错。
         try:
@@ -303,7 +308,7 @@ async def get_thread_history(
         "e.seq, e.event_type, e.payload, e.created_at "
         "FROM agent_runs r LEFT JOIN run_events e ON e.run_id=r.id "
         "WHERE r.thread_id=:tid AND r.uid=:uid "
-        "ORDER BY r.created_at ASC, e.seq ASC"
+        "ORDER BY r.created_at ASC, r.id ASC, e.seq ASC"
     ), {"tid": thread_id, "uid": current_user.uid})
     persisted = event_rows.fetchall()
     raw: list[dict] = []
@@ -311,8 +316,10 @@ async def get_thread_history(
         rebuilt: list[dict] = []
         current_run = None
         assistant_content: list[str] = []
+        assistant_created_at = None
 
         def flush_assistant() -> None:
+            nonlocal assistant_created_at
             if current_run is None or not assistant_content:
                 return
             rebuilt.append({
@@ -323,9 +330,16 @@ async def get_thread_history(
                 "tool_calls": [],
                 "run_id": current_run[0],
                 "request_id": current_run[1],
-                "created_at": current_run[2].isoformat() if current_run[2] else None,
+                "created_at": (
+                    assistant_created_at.isoformat()
+                    if assistant_created_at is not None
+                    else current_run[2].isoformat()
+                    if current_run[2]
+                    else None
+                ),
             })
             assistant_content.clear()
+            assistant_created_at = None
 
         for run_id, request_id, input_payload, run_created_at, seq, event_type, payload, event_created_at in persisted:
             if current_run != (run_id, request_id, run_created_at):
@@ -347,6 +361,8 @@ async def get_thread_history(
                 chunk = payload.get("chunk") or {}
                 stream_event = chunk.get("stream_event") or {}
                 if stream_event.get("type") == "message_delta":
+                    if assistant_created_at is None:
+                        assistant_created_at = event_created_at
                     assistant_content.append(str(stream_event.get("content") or ""))
             elif event_type == "context_compression":
                 flush_assistant()
@@ -380,7 +396,13 @@ async def get_thread_history(
             "role": "user" if msg_type == "human" else "system" if msg_type == "system" else "assistant",
             "content": _display_message_content(m.get("content")),
             "tool_calls": m.get("tool_calls") or [],
-            "created_at": utc_now_naive().isoformat(),
+            "created_at": (
+                m.get("created_at")
+                if isinstance(m.get("created_at"), str)
+                else m.get("created_at").isoformat()
+                if m.get("created_at") is not None
+                else utc_now_naive().isoformat()
+            ),
         }
         messages.append(entry)
 

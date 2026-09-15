@@ -44,7 +44,7 @@ check_pid_command() {
 
 check_tools() {
   [[ -x "$VENV_DIR/bin/python" ]] || die "未找到虚拟环境：$VENV_DIR，请先创建并安装项目依赖。"
-  command -v pnpm >/dev/null 2>&1 || die "未找到 pnpm，请先安装 pnpm。"
+  command -v node >/dev/null 2>&1 || die "未找到 node，请先安装 Node.js。"
   [[ -d "$PROJECT_DIR/web/node_modules" ]] || die "前端依赖未安装，请执行：pnpm --dir web install"
 }
 
@@ -53,7 +53,7 @@ check_dependencies() {
   for url in "${DATADECK_LOCAL_POSTGRES_HEALTH_URL:-}" "${DATADECK_LOCAL_QDRANT_HEALTH_URL:-http://127.0.0.1:6333/healthz}"; do
     [[ -z "$url" ]] && continue
     if ! curl --noproxy '*' --max-time 2 --silent --fail "$url" >/dev/null 2>&1; then
-      warn "依赖服务未通过 HTTP 检查：$url（后端仍会启动，请确认本地服务已运行）"
+      warn "依赖服务未通过 HTTP 检查：${url}（后端仍会启动，请确认本地服务已运行）"
     fi
   done
   if ! "$VENV_DIR/bin/python" - <<'PY'
@@ -69,19 +69,72 @@ PY
   fi
 }
 
+wait_for_port() {
+  local host port name
+  host="$1"
+  port="$2"
+  name="$3"
+  for _ in {1..30}; do
+    if "$VENV_DIR/bin/python" - "$host" "$port" 2>/dev/null <<'PY'
+import socket
+import sys
+
+with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=1):
+    pass
+PY
+    then
+      return 0
+    fi
+    sleep 0.5
+  done
+  warn "${name} 启动后未监听 ${host}:${port}，请查看对应日志。"
+  return 1
+}
+
+kill_process_tree() {
+  local pid="$1" child
+  for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+    kill_process_tree "$child"
+  done
+  kill "$pid" 2>/dev/null || true
+}
+
+stop_project_listener() {
+  local port listener_pid listener_command pids
+  port="$1"
+  listener_pid=""
+  listener_command=""
+  pids=""
+  command -v lsof >/dev/null 2>&1 || return 0
+  pids="$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+  for listener_pid in $pids; do
+    listener_command="$(ps -p "$listener_pid" -o command= 2>/dev/null || true)"
+    if [[ "$listener_command" == *"$PROJECT_DIR"* \
+       || "$listener_command" == *"server.main:app"* \
+       || "$listener_command" == *"vite/bin/vite.js"* ]]; then
+      warn "清理本项目残留监听进程 ${listener_pid}（端口 ${port}）"
+      kill_process_tree "$listener_pid"
+    fi
+  done
+}
+
 stop_one() {
-  local file="$1" pattern="$2" name="$3" pid
+  local file pattern name pid
+  file="$1"
+  pattern="$2"
+  name="$3"
+  pid=""
   pid="$(pid_from "$file" || true)"
   if [[ -n "$pid" ]] && check_pid_command "$pid" "$pattern"; then
-    kill "$pid" 2>/dev/null || true
+    kill_process_tree "$pid"
     for _ in {1..20}; do
       kill -0 "$pid" 2>/dev/null || break
       sleep 0.25
     done
     if kill -0 "$pid" 2>/dev/null; then
-      warn "$name 未正常退出，发送 TERM 后跳过强制杀进程：$pid"
+      warn "${name} 未正常退出，发送 TERM 后跳过强制杀进程：${pid}"
     fi
-    info "已停止 $name：$pid"
+    info "已停止 ${name}：${pid}"
   fi
   rm -f "$file"
 }
@@ -89,7 +142,9 @@ stop_one() {
 start() {
   check_tools
   stop_one "$BACKEND_PID" "server.main:app" "后端"
-  stop_one "$FRONTEND_PID" "vite" "前端"
+  stop_one "$FRONTEND_PID" "vite/bin/vite.js" "前端"
+  stop_project_listener "${DATADECK_LOCAL_BACKEND_PORT:-8000}"
+  stop_project_listener "${DATADECK_LOCAL_FRONTEND_PORT:-5173}"
   # .env 只作为 dotenv 配置文件读取，不能 source：Token 等值可能含有
   # shell 特殊字符，source 会把它们误当成命令执行。
   local database_url
@@ -108,15 +163,20 @@ start() {
   echo $! > "$BACKEND_PID"
 
   info "启动前端：http://127.0.0.1:${DATADECK_LOCAL_FRONTEND_PORT:-5173}"
-  nohup pnpm --dir web dev --host 127.0.0.1 --port "${DATADECK_LOCAL_FRONTEND_PORT:-5173}" \
+  nohup node "$PROJECT_DIR/web/node_modules/vite/bin/vite.js" "$PROJECT_DIR/web" \
+    --host 127.0.0.1 --port "${DATADECK_LOCAL_FRONTEND_PORT:-5173}" \
     >"$FRONTEND_LOG" 2>&1 &
   echo $! > "$FRONTEND_PID"
+  wait_for_port "127.0.0.1" "${DATADECK_LOCAL_BACKEND_PORT:-8000}" "后端" || true
+  wait_for_port "127.0.0.1" "${DATADECK_LOCAL_FRONTEND_PORT:-5173}" "前端" || true
   info "启动完成，日志目录：$RUNTIME_DIR"
 }
 
 stop() {
-  stop_one "$FRONTEND_PID" "vite" "前端"
+  stop_one "$FRONTEND_PID" "vite/bin/vite.js" "前端"
   stop_one "$BACKEND_PID" "server.main:app" "后端"
+  stop_project_listener "${DATADECK_LOCAL_BACKEND_PORT:-8000}"
+  stop_project_listener "${DATADECK_LOCAL_FRONTEND_PORT:-5173}"
 }
 
 status() {

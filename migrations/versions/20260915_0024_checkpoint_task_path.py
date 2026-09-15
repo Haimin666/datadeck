@@ -13,12 +13,22 @@ depends_on: str | None = None
 
 def upgrade() -> None:
     # langgraph-checkpoint-postgres >= 3 writes task_path for nested/parallel tasks.
-    # IF NOT EXISTS keeps this safe for databases already upgraded by the saver.
+    # Checkpoint tables belong to langgraph and are created by AsyncPostgresSaver.setup.
+    # Alembic runs before the app initializes the saver on a fresh database, so this
+    # migration must be a no-op until those tables exist.
     op.execute(
+        "DO $$ BEGIN "
+        "IF to_regclass('public.checkpoint_writes') IS NOT NULL THEN "
         "ALTER TABLE checkpoint_writes "
-        "ADD COLUMN IF NOT EXISTS task_path TEXT NOT NULL DEFAULT ''"
+        "ADD COLUMN IF NOT EXISTS task_path TEXT NOT NULL DEFAULT ''; "
+        "END IF; END $$"
     )
 
 
 def downgrade() -> None:
-    op.execute("ALTER TABLE checkpoint_writes DROP COLUMN IF EXISTS task_path")
+    op.execute(
+        "DO $$ BEGIN "
+        "IF to_regclass('public.checkpoint_writes') IS NOT NULL THEN "
+        "ALTER TABLE checkpoint_writes DROP COLUMN IF EXISTS task_path; "
+        "END IF; END $$"
+    )

@@ -24,5 +24,15 @@ def test_repository_snapshot_index_is_hashable_and_skips_binary(tmp_path: Path):
     assert any("dwd.user" in item for item in sql["tables_json"])
 
 
+def test_repository_snapshot_skips_symlinked_files(tmp_path: Path):
+    outside = tmp_path / "outside.sql"
+    outside.write_text("select secret from outside_table", encoding="utf-8")
+    (tmp_path / "linked.sql").symlink_to(outside)
+
+    items = _snapshot_file_metadata(tmp_path, "abc123")
+
+    assert {item["path"] for item in items} == {"outside.sql"}
+
+
 def test_default_rag_source_types_are_business_only():
     assert BUSINESS_SOURCE_TYPES == {"upload", "wiki", "business_doc"}

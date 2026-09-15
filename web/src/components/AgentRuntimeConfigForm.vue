@@ -270,7 +270,7 @@
             </template>
           </a-input>
           <a-select
-            v-if="isToolsKind(currentConfigKind)"
+            v-if="isSelectableResourceKind(currentConfigKind)"
             v-model:value="selectionCategory"
             class="selection-category"
             size="small"
@@ -280,29 +280,31 @@
               {{ getOptionGroupLabel({ group }) || group }}
             </a-select-option>
           </a-select>
-          <template v-if="!isReadOnlyConfig && isToolsKind(currentConfigKind)">
+          <template v-if="!isReadOnlyConfig && isSelectableResourceKind(currentConfigKind)">
             <a-button type="text" size="small" @click="selectAllFiltered" class="inline-action-btn">全选</a-button>
             <a-button type="text" size="small" @click="clearFilteredSelection" class="inline-action-btn">清空</a-button>
-            <a-button
-              type="text"
-              size="small"
-              @click="refreshConfigOptions(currentConfigKey, currentConfigKind)"
-              class="inline-action-btn lucide-icon-btn"
-              title="刷新列表"
-            >
-              <RotateCw :size="14" />
-              刷新
-            </a-button>
-            <a-button
-              type="text"
-              size="small"
-              @click="navigateToConfigPage(currentConfigKind)"
-              class="inline-action-btn lucide-icon-btn"
-              title="跳转配置"
-            >
-              <Settings :size="14" />
-              配置
-            </a-button>
+            <template v-if="isToolsKind(currentConfigKind)">
+              <a-button
+                type="text"
+                size="small"
+                @click="refreshConfigOptions(currentConfigKey, currentConfigKind)"
+                class="inline-action-btn lucide-icon-btn"
+                title="刷新列表"
+              >
+                <RotateCw :size="14" />
+                刷新
+              </a-button>
+              <a-button
+                type="text"
+                size="small"
+                @click="navigateToConfigPage(currentConfigKind)"
+                class="inline-action-btn lucide-icon-btn"
+                title="跳转配置"
+              >
+                <Settings :size="14" />
+                配置
+              </a-button>
+            </template>
           </template>
         </div>
 
@@ -495,8 +497,10 @@ const isCurrentSegmentEmpty = computed(
 
 // 判断是否为需要跳转的配置类型
 const isToolsKind = (kind) => {
-  return isToolResourceKind(kind)
+  return kind === 'tools'
 }
+
+const isSelectableResourceKind = (kind) => isDefaultAllAgentResourceKind(kind)
 
 // 强制刷新对应配置项的选项列表
 const refreshConfigOptions = async () => {

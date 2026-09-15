@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from server.repositories.conversation_repository import ConversationRepository
 from server.repositories.project_repository import ProjectRepository
 from server.workspace.paths import ensure_bound_user_workdir
+from server.workspace.temp_workdir import open_temporary_workdir
 from server.workspace.workdir import Workdir
 
 
@@ -28,22 +29,37 @@ class AuthorizedWorkdir:
 
 
 async def resolve_authorized_workdir(*, thread_id: str, uid: str, db) -> AuthorizedWorkdir:
-    """授权线程并统一解析 Project 或历史 Workdir 绑定。"""
+    """授权线程并统一解析 Project 或临时 Workdir 绑定。
+
+    历史线程可能残留已删除的 Project 绑定。文件查看器不能因此返回 500，
+    此时降级到该线程专属临时目录；不会暴露其他用户或其他项目文件。
+    """
     conversation = await ConversationRepository(db).get_conversation_by_thread_id(thread_id)
     if conversation is None or conversation.uid != str(uid) or conversation.status == "deleted":
         raise HTTPException(status_code=404, detail="对话线程不存在")
-    workdir_path, project = await resolve_conversation_workdir_binding(
-        conversation=conversation,
-        uid=str(uid),
-        db=db,
-    )
+    try:
+        workdir_path, project = await resolve_conversation_workdir_binding(
+            conversation=conversation,
+            uid=str(uid),
+            db=db,
+        )
+        workdir = Workdir.open_existing(str(uid), workdir_path)
+        project_id = project.id
+        directory_mode = project.directory_mode
+    except RuntimeError as exc:
+        if str(exc) != "Conversation 绑定的 Project 不存在":
+            raise
+        workdir = open_temporary_workdir(str(uid), str(thread_id))
+        workdir_path = workdir.relative_path
+        project_id = "temporary"
+        directory_mode = "temporary"
     return AuthorizedWorkdir(
         conversation_id=conversation.id,
         thread_id=conversation.thread_id,
         uid=str(uid),
-        workdir=Workdir.open_existing(str(uid), workdir_path),
-        project_id=project.id,
-        directory_mode=project.directory_mode,
+        workdir=workdir,
+        project_id=project_id,
+        directory_mode=directory_mode,
     )
 
 

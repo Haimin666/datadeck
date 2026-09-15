@@ -13,8 +13,6 @@ export const useUserStore = defineStore('user', () => {
   const avatar = ref('')
   const userRole = ref('')
   const permissions = ref([])
-  const departmentId = ref(null)
-  const departmentName = ref('')
 
   // 计算属性
   const isLoggedIn = computed(() => !!token.value)
@@ -32,8 +30,6 @@ export const useUserStore = defineStore('user', () => {
     avatar.value = data.avatar || ''
     userRole.value = data.role
     permissions.value = Array.isArray(data.permissions) ? data.permissions : []
-    departmentId.value = data.department_id || null
-    departmentName.value = data.department_name || ''
     localStorage.setItem('user_token', data.access_token)
   }
 
@@ -62,8 +58,6 @@ export const useUserStore = defineStore('user', () => {
     avatar.value = ''
     userRole.value = ''
     permissions.value = []
-    departmentId.value = null
-    departmentName.value = ''
 
     // 清除 agentStore 状态，确保重新登录时能正确加载数据
     const agentStore = useAgentStore()
@@ -190,8 +184,6 @@ export const useUserStore = defineStore('user', () => {
       avatar.value = userData.avatar || ''
       userRole.value = userData.role
       permissions.value = Array.isArray(userData.permissions) ? userData.permissions : []
-      departmentId.value = userData.department_id || null
-      departmentName.value = userData.department_name || ''
 
       return userData
     } catch (error) {
@@ -230,8 +222,6 @@ export const useUserStore = defineStore('user', () => {
     avatar,
     userRole,
     permissions,
-    departmentId,
-    departmentName,
 
     // 计算属性
     isLoggedIn,

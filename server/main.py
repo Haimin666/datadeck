@@ -109,7 +109,7 @@ async def lifespan(app: FastAPI):
         if not r.scalar_one_or_none():
             db.add(Agent(
                 id="default-chatbot", slug="default-chatbot", name="对话助手",
-                description="内置对话智能体，支持 Text2SQL",
+                description="内置通用对话智能体，按实际挂载能力完成问答和任务协作",
                 backend_id="ChatbotAgent", is_builtin=True,
             ))
 

@@ -17,6 +17,11 @@ MODULE_PERMISSIONS = frozenset({
     "conversations", "agents", "workspace", "knowledge", "extensions", "scheduled_tasks", "metrics",
     "settings", "users",
 })
+# These capabilities belong to an Agent runtime. A role only needs an Agent
+# assignment to use them; they are not independent user-level grants.
+AGENT_RUNTIME_MODULES = frozenset({
+    "conversations", "agents", "workspace", "knowledge", "extensions", "scheduled_tasks", "metrics",
+})
 BUILTIN_ROLE_PERMISSIONS = {
     "superadmin": sorted(MODULE_PERMISSIONS),
     "admin": ["conversations", "agents", "workspace", "knowledge", "extensions", "scheduled_tasks", "metrics", "settings", "users"],

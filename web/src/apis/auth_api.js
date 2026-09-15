@@ -52,10 +52,9 @@ async function getUsers({ skip = 0, limit = 100 } = {}) {
   return apiGet(`/api/auth/users?${params}`)
 }
 
-async function getUsersPage({ offset = 0, limit = 50, search, departmentId, role } = {}) {
+async function getUsersPage({ offset = 0, limit = 50, search, role } = {}) {
   const params = new URLSearchParams({ offset: String(offset), limit: String(limit) })
   if (search) params.set('search', search)
-  if (departmentId) params.set('department_id', String(departmentId))
   if (role) params.set('role', role)
   return apiAdminGet(`/api/auth/users/page?${params}`)
 }

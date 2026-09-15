@@ -12,6 +12,25 @@ die() { echo "[ERROR] $*" >&2; exit 1; }
 info() { echo "[INFO] $*"; }
 warn() { echo "[WARN] $*" >&2; }
 
+replace_env_value() {
+  local file="$1" key="$2" value="$3" backup
+  backup="$(mktemp "${file}.XXXXXX")"
+  awk -v key="$key" -v value="$value" '
+    $0 ~ "^[[:space:]]*" key "=" { print key "=" value; found = 1; next }
+    { print }
+    END { if (!found) print key "=" value }
+  ' "$file" >"$backup"
+  chmod 600 "$backup"
+  mv "$backup" "$file"
+}
+
+generate_initial_secrets() {
+  local file="$1"
+  command -v openssl >/dev/null 2>&1 || die "首次初始化需要 openssl 生成随机密钥。"
+  replace_env_value "$file" JWT_SECRET_KEY "$(openssl rand -hex 32)"
+  replace_env_value "$file" POSTGRES_PASSWORD "$(openssl rand -hex 24)"
+}
+
 require_docker() {
   command -v docker >/dev/null 2>&1 || die "未找到 docker，请先安装 Docker Engine。"
   docker compose version >/dev/null 2>&1 || die "未找到 Docker Compose 插件，请安装 docker compose v2。"
@@ -25,13 +44,34 @@ prepare_workspace() {
     [[ -f "$PROJECT_DIR/.env.docker.example" ]] || die "缺少 .env.docker.example"
     cp "$PROJECT_DIR/.env.docker.example" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
-    warn "已生成 $ENV_FILE；请填写模型 API Key 和 JWT_SECRET_KEY 后再启动。"
+    generate_initial_secrets "$ENV_FILE"
+    info "已生成 $ENV_FILE，并写入随机 JWT/PostgreSQL 密码。请继续填写模型 API Key。"
   fi
 }
 
 compose() { docker compose --env-file "$ENV_FILE" "$@"; }
 
+validate_dotenv_file() {
+  local file="$1" label temp_dir line
+  [[ -f "$file" ]] || return 0
+  label="$(basename "$file")"
+  temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/datadeck-env-check.XXXXXX")"
+  if ! awk '
+    /^[[:space:]]*$/ || /^[[:space:]]*#/ || /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=/ { next }
+    { printf "%s", NR; exit 1 }
+  ' "$file" >"$temp_dir/line" 2>/dev/null; then
+    line="$(< "$temp_dir/line")"
+    rm -f "$temp_dir/line"
+    rmdir "$temp_dir" 2>/dev/null || true
+    die "$label 第 ${line:-未知} 行不是有效的 KEY=VALUE 配置；请删除终端提示符或命令输出后重试。"
+  fi
+  rm -f "$temp_dir/line"
+  rmdir "$temp_dir"
+}
+
 validate_compose_config() {
+  validate_dotenv_file "$ENV_FILE"
+  validate_dotenv_file "$PROJECT_DIR/.env"
   compose config --quiet || die "Compose 配置校验失败，请检查 $ENV_FILE"
 }
 

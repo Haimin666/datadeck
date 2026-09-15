@@ -218,6 +218,11 @@ def get_tool_descriptors(
 
 def get_tool_instances_for_context(context) -> list[Any]:
     """按 context.tools（None=全部 buildin）解析工具实例列表。"""
+    # 纯闲聊由任务分类器确定不需要任何工具；在核心解析入口再次
+    # 门控，避免工作区工具绕过宿主工具层进入正式 Graph。
+    if getattr(context, "task_kind", "") == "chat":
+        return []
+
     from datadeck.agents.toolkits.registry import (
         get_all_extra_metadata,
         get_all_tool_instances,

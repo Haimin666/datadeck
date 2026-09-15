@@ -12,7 +12,7 @@ from server.db import get_db
 from server.deps import get_required_user, get_role_permissions, get_role_agent_slugs, require_agent_access
 from server.models import User, Agent, ScheduledTask
 from datadeck.agents.toolkits.service import get_tool_descriptors
-from datadeck.agents.policy import DATA_AGENT_POLICY
+from datadeck.agents.policy import COMMON_PLATFORM_PACKAGE, DATA_AGENT_POLICY
 from datadeck.agents.toolkits.packages import (
     TOOL_PACKAGES,
     mcp_package_options,
@@ -35,9 +35,12 @@ def _configurable_items(
     subagent_options: list[dict] | None = None,
 ) -> dict:
     # 能力包是配置页唯一入口；包内成员只在运行时展开，不重复暴露给用户选择。
+    fixed_packages = {COMMON_PLATFORM_PACKAGE}
+    if backend_id == "DataAgent":
+        fixed_packages.update(DATA_AGENT_FIXED_PACKAGES)
     tool_options = get_tool_descriptors(
         include_internal=False,
-        fixed_packages=DATA_AGENT_FIXED_PACKAGES if backend_id == "DataAgent" else set()
+        fixed_packages=fixed_packages,
     )
     for item in mcp_package_options(mcp_options):
         tool_options.append(ToolDescriptor(
@@ -56,6 +59,13 @@ def _configurable_items(
             metadata=item.get("metadata", {}),
         ))
     return {
+        "identity_prompt": {
+            "name": "Agent 身份",
+            "description": "可选。留空时不使用固定身份，也不会自动宣称未挂载的能力。",
+            "type": "text",
+            "kind": "prompt",
+            "default": "",
+        },
         "model": {
             "name": "模型",
             "description": "为该智能体选择默认聊天模型；留空使用系统默认模型",
@@ -235,14 +245,21 @@ async def _get_agent_by_identifier(db: AsyncSession, identifier: str) -> Agent |
 
 
 async def _get_configurable_items(
-    db: AsyncSession, current_user: User, backend_id: str = "ChatbotAgent"
+    db: AsyncSession,
+    current_user: User,
+    backend_id: str = "ChatbotAgent",
+    *,
+    runtime_access: bool = False,
+    allowed_skill_slugs: set[str] | None = None,
+    allowed_knowledge_ids: set[str] | None = None,
+    allowed_subagent_slugs: set[str] | None = None,
 ) -> dict:
     """Return the same runtime resource catalogue for new and existing agents."""
     from server.services.knowledge_service import list_knowledge_bases
 
     permissions = set(await get_role_permissions(db, current_user.role))
     knowledge_options = []
-    if "knowledge" in permissions:
+    if runtime_access or "knowledge" in permissions:
         knowledge_options = [
             {
                 "slug": item["kb_id"] if item.get("kb_id") else item["id"],
@@ -250,30 +267,44 @@ async def _get_configurable_items(
                 "description": item.get("description", ""),
                 "group": "knowledge",
             }
-            for item in await list_knowledge_bases(db, current_user.uid)
+            for item in await list_knowledge_bases(
+                db,
+                current_user.uid,
+                allowed_ids=allowed_knowledge_ids if runtime_access else None,
+            )
         ]
-    accessible_skills = (
-        await list_accessible_skills(db, current_user, require_enabled=False)
-        if "extensions" in permissions else []
-    )
+    accessible_skills = []
+    if runtime_access or "extensions" in permissions:
+        accessible_skills = await list_accessible_skills(
+            db,
+            current_user,
+            require_enabled=False,
+            bypass_share=runtime_access,
+            allowed_slugs=allowed_skill_slugs,
+        )
     skill_options = [
         {"slug": item.slug, "name": item.name, "description": item.description or "", "group": "skill"}
         for item in accessible_skills
         if item.source_scope != "builtin"
     ]
     mcp_options = []
-    if "extensions" in permissions:
+    if runtime_access or "extensions" in permissions:
         mcp_options = [
             {"slug": item.slug, "name": item.name, "description": item.description or "", "group": "mcp"}
             for item in await get_all_mcp_servers(db)
             if bool(item.enabled)
         ]
     subagents = []
-    if "agents" in permissions:
+    if runtime_access or "agents" in permissions:
         subagent_query = select(Agent).where(
             Agent.execution_role == "subagent",
         ).order_by(Agent.name)
         allowed = await get_role_agent_slugs(db, current_user.role)
+        if runtime_access and allowed_subagent_slugs:
+            allowed = (
+                None if allowed is None
+                else set(allowed) | set(allowed_subagent_slugs)
+            )
         if allowed is not None:
             subagent_query = subagent_query.where(Agent.slug.in_(allowed))
         subagents = (await db.execute(subagent_query)).scalars().all()
@@ -304,7 +335,7 @@ async def list_backends():
         {
             "id": "ChatbotAgent",
             "name": "对话助手",
-            "description": "内置对话智能体，支持 Text2SQL",
+            "description": "内置通用对话智能体，按实际挂载能力完成问答和任务协作",
             "type": "agent_backend",
             "is_builtin": True,
         }
@@ -379,10 +410,34 @@ async def get_agent(
     if not a:
         raise HTTPException(status_code=404, detail="智能体不存在")
     await require_agent_access(db, current_user, a.slug)
+    raw_context = (a.config_json or {}).get("context", a.config_json or {})
+    configured_skill_slugs = None
+    configured_knowledge_ids = None
+    configured_subagent_slugs = None
+    if isinstance(raw_context, dict) and isinstance(raw_context.get("skills"), list):
+        configured_skill_slugs = {
+            str(item).strip() for item in raw_context["skills"] if str(item).strip()
+        }
+    if isinstance(raw_context, dict) and isinstance(raw_context.get("knowledges"), list):
+        configured_knowledge_ids = {
+            str(item).strip() for item in raw_context["knowledges"] if str(item).strip()
+        }
+    if isinstance(raw_context, dict) and isinstance(raw_context.get("subagents"), list):
+        configured_subagent_slugs = {
+            str(item).strip() for item in raw_context["subagents"] if str(item).strip()
+        }
     return {
         "agent": {
             **_serialize_agent(a, current_user),
-            "configurable_items": await _get_configurable_items(db, current_user, a.backend_id),
+            "configurable_items": await _get_configurable_items(
+                db,
+                current_user,
+                a.backend_id,
+                runtime_access=True,
+                allowed_skill_slugs=configured_skill_slugs,
+                allowed_knowledge_ids=configured_knowledge_ids,
+                allowed_subagent_slugs=configured_subagent_slugs,
+            ),
         }
     }
 

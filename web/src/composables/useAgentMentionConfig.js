@@ -56,8 +56,6 @@ export function useAgentMentionConfig({
   currentThreadAttachments,
   configurableItems,
   agentConfig,
-  availableKnowledgeBases,
-  availableSkills
 }) {
   const mentionConfig = computed(() => {
     const rawFiles = currentAgentState.value?.files || {}
@@ -145,28 +143,10 @@ export function useAgentMentionConfig({
       return result
     }
 
-    // @ 引用是本次运行的临时挂载，不应受 Agent 编辑页当前白名单限制；
-    // 这里只展示当前用户有权限访问的资源，后端仍会在装配阶段二次校验。
-    const mergeResources = (configured, available, kind) => {
-      const result = [...configured]
-      const seen = new Set(result.map((item) => String(item.value || '')))
-      ;(available || []).forEach((option) => {
-        const normalized = normalizeMentionResource(option, kind)
-        const value = String(normalized?.[kind === 'knowledges' ? 'kb_id' : 'slug'] || '')
-        if (normalized && value && !seen.has(value)) {
-          seen.add(value)
-          result.push({ value, ...normalized })
-        }
-      })
-      return result
-    }
-
-    const knowledgeBases = mergeResources(
-      selectOptions('knowledges'), availableKnowledgeBases?.value, 'knowledges'
-    )
-    const skills = mergeResources(
-      selectOptions('skills'), availableSkills?.value, 'skills'
-    )
+    // @ 候选必须与本次 Agent 的运行时装配一致。全局 availableSkills/
+    // availableKnowledgeBases 可能包含其它 Agent 或已删除资源，不能追加到这里。
+    const knowledgeBases = selectOptions('knowledges')
+    const skills = selectOptions('skills')
     const subagents = selectOptions('subagents')
 
     return {

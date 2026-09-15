@@ -171,6 +171,26 @@ def test_dataagent_policy_blocks_subagent_tools_even_if_configured():
     assert "subagent_start" not in names
 
 
+def test_dataagent_code_search_is_only_mounted_for_code_logic_questions():
+    user = type("User", (), {"uid": "u1"})()
+    normal = ChatBotContext(tools=DATA_AGENT_TOOLS, agent_backend_id="DataAgent", task_kind="schema")
+    code = ChatBotContext(tools=DATA_AGENT_TOOLS, agent_backend_id="DataAgent", task_kind="code")
+
+    normal_names = {tool.name for tool in build_agent_runtime_tools(normal, user)}
+    code_names = {tool.name for tool in build_agent_runtime_tools(code, user)}
+
+    assert "code_search" not in normal_names
+    assert "code_search" in code_names
+
+
+def test_pure_chat_does_not_mount_host_tools():
+    user = type("User", (), {"uid": "u1"})()
+    context = ChatBotContext(tools=["package:platform"], task_kind="chat")
+
+    assert build_agent_runtime_tools(context, user) == []
+    assert get_tool_instances_for_context(context) == []
+
+
 def test_knowledge_package_mounts_metric_lookup_for_generic_agent():
     user = type("User", (), {"uid": "u1"})()
     context = ChatBotContext(

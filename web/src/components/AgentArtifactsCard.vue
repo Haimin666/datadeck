@@ -4,7 +4,7 @@
       <button
         type="button"
         class="item-main"
-        :title="`打开 ${file.name}`"
+        :title="props.previewEnabled ? `打开 ${file.name}` : `下载 ${file.name}`"
         @click="openPreview(file)"
       >
         <FileTypeIcon :name="file.path" :size="20" class="item-icon" />
@@ -18,6 +18,7 @@
           <Download :size="15" />
         </button>
         <button
+          v-if="props.saveEnabled"
           class="item-action-btn"
           :title="isSaving(file.path) ? '保存中' : '保存到个人空间'"
           :disabled="isSaving(file.path)"
@@ -67,6 +68,14 @@ const props = defineProps({
   threadId: {
     type: String,
     default: null
+  },
+  previewEnabled: {
+    type: Boolean,
+    default: true
+  },
+  saveEnabled: {
+    type: Boolean,
+    default: true
   }
 })
 const emit = defineEmits(['saved', 'open-preview'])
@@ -116,6 +125,10 @@ const getFileMetaLabel = (path) => {
 }
 
 const openPreview = (file) => {
+  if (!props.previewEnabled) {
+    void downloadFile(file)
+    return
+  }
   emit('open-preview', { ...file })
 }
 

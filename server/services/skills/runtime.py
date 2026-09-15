@@ -104,7 +104,21 @@ async def resolve_runtime_skills_for_context(
             "preloaded_skills": [],
             "preloaded_skill_contents": {},
         }
-    skill_items = [item for item in await list_accessible_skills(db, user) if item.slug]
+    if getattr(context, "agent_resource_access", False):
+        configured_skills = getattr(context, "skills", None)
+        allowed_slugs = (
+            {str(item).strip() for item in configured_skills if str(item).strip()}
+            if isinstance(configured_skills, (list, tuple, set)) else None
+        )
+        skill_items = await list_accessible_skills(
+            db,
+            user,
+            bypass_share=allowed_slugs is not None,
+            allowed_slugs=allowed_slugs,
+        )
+    else:
+        skill_items = await list_accessible_skills(db, user)
+    skill_items = [item for item in skill_items if item.slug]
     runtime_skills = build_runtime_skills(skill_items)
     available = set(runtime_skills)
     configured_skills = getattr(context, "skills", None)

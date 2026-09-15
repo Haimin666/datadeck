@@ -21,7 +21,11 @@ from langchain_core.tools import StructuredTool
 from datadeck.agents.base import BaseAgent
 from datadeck.agents.buildin.chatbot.context import ChatBotContext
 from datadeck.agents.buildin.chatbot.data_prompt import build_data_agent_prompt
-from datadeck.agents.buildin.chatbot.prompt import TODO_MID_PROMPT, build_prompt_with_context
+from datadeck.agents.buildin.chatbot.prompt import (
+    TODO_MID_PROMPT,
+    build_capability_prompt,
+    build_prompt_with_context,
+)
 from datadeck.agents.buildin.chatbot.state import ChatBotState
 from datadeck.agents.context import BaseContext
 from datadeck.agents.middlewares import TokenUsageMiddleware
@@ -219,8 +223,22 @@ class ChatbotAgent(BaseAgent):
                     "禁止调用任何其他工具、猜测表结构或访问无关路径；直接向用户说明 dba Skill 未挂载，"
                     "并提示重新挂载/授权后重试。"
                 )
-        if any(getattr(t, "name", "").startswith(("sql_execute", "omd_", "rag_")) for t in tools):
-            system_prompt = build_data_agent_prompt(system_prompt)
+        data_tools = any(
+            str(getattr(t, "name", "") or "").startswith(
+                ("sql_execute", "omd_", "rag_", "metric_", "code_search")
+            )
+            for t in tools
+        )
+        is_data_agent = getattr(context, "agent_backend_id", "") == "DataAgent"
+        if data_tools and is_data_agent:
+            system_prompt = build_data_agent_prompt(
+                system_prompt,
+                has_dba=("dba" in set(getattr(context, "_effective_skill_slugs", []) or [])
+                         and any(str(getattr(t, "name", "") or "") == "run_skill_script" for t in tools)),
+            )
+        capability_prompt = build_capability_prompt(context, tools)
+        if capability_prompt:
+            system_prompt += f"\n\n{capability_prompt}"
         collection = getattr(context, "knowledge_base_collection", None)
         if collection:
             system_prompt += (

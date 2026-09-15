@@ -84,7 +84,7 @@ def _snapshot_file_metadata(root: Path, commit: str) -> list[dict]:
     ignored = {".git", "node_modules", "venv", ".venv", "__pycache__", "dist", "build"}
     result = []
     for path in root.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in suffixes:
+        if path.is_symlink() or not path.is_file() or path.suffix.lower() not in suffixes:
             continue
         relative = path.relative_to(root)
         if any(part in ignored for part in relative.parts):
@@ -227,6 +227,9 @@ async def pull_code_repository(db: AsyncSession, uid: str, repo_id: str) -> dict
         else:
             await asyncio.to_thread(_git, repo, ["remote", "set-url", "origin", clone_url], key_file=key_path, access_token=access_token)
             await asyncio.to_thread(_git, repo, ["fetch", "--depth", "1", "origin", repo.branch], key_file=key_path, access_token=access_token)
+            # 该目录是 DataDeck 管理的 Git 快照，不承载用户手工文件。先清理
+            # 未跟踪文件，再 reset，避免已删除的远端文件或残留文件继续进入代码索引。
+            await asyncio.to_thread(_git, repo, ["clean", "-fdx"], key_file=key_path, access_token=access_token)
             await asyncio.to_thread(_git, repo, ["reset", "--hard", f"origin/{repo.branch}"], key_file=key_path, access_token=access_token)
         commit = (await asyncio.to_thread(_git, repo, ["rev-parse", "HEAD"], key_file=key_path, access_token=access_token)).strip()
         indexed_files = await _index_repository_snapshot(db, repo, commit)

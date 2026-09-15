@@ -313,7 +313,7 @@ const setAccessLevel = (scopeKey, accessLevel) => {
 
 const userOptions = computed(() =>
   users.value.map((user) => ({
-    label: user.department_name ? `${user.username}（${user.department_name}）` : user.username,
+    label: user.username,
     value: user.uid
   }))
 )

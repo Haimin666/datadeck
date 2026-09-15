@@ -101,11 +101,6 @@
               {{ userRoleText }}
             </span>
           </div>
-          <div class="identity-item">
-            <span class="identity-icon"><Building2 :size="15" /></span>
-            <span class="profile-label">部门</span>
-            <span class="profile-value">{{ userStore.departmentName || '默认部门' }}</span>
-          </div>
         </div>
       </div>
       <UserConfigSettingsCard ref="userConfigRef" />
@@ -118,7 +113,7 @@ import UserConfigSettingsCard from '@/components/UserConfigSettingsCard.vue'
 
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { Building2, RefreshCw, ShieldCheck, Upload } from '@lucide/vue'
+import { RefreshCw, ShieldCheck, Upload } from '@lucide/vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { useUserStore } from '@/stores/user'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'

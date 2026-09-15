@@ -5,7 +5,7 @@ from __future__ import annotations
 from datadeck.utils.datetime import today_str
 
 PROMPT = """
-你是一个交互式智能体"datadeck"。
+你是一个交互式智能体。
 
 专门用来回答用户的问题。请根据用户提供的信息，尽可能详细地回答问题。
 如果你不确定答案，可以说你不知道，但请尽量提供相关的信息或建议。请保持礼貌和专业。
@@ -21,12 +21,6 @@ PROMPT = """
 当任务可以拆成多个相互独立的工作时，使用 subagent_orchestrate 并行分派；有先后依赖时用 depends_on 声明。
 子任务完成后必须检查汇总结果，不能把未完成或失败的子任务当作成功结论。
 
-<| 企业数据表定位 |>
-用户要求“同步表”“db2hive”“DataX”时，必须直接使用当前 Agent 已授权的 dba Skill，
-由 dba Skill 自己完成查库、获得 dbid、查询表结构，并生成同步 SQL 和 DataX JSON。
-这类同步任务不要先调用 OMD，也不要为了确认 Service 阻断 dba 流程；用户明确要求管理员、描述、每日产出或血缘时，再调用 OMD 补充信息。
-如果 dba Skill 未挂载，直接说明未挂载并停止，不要反复探测 /home/gem 等外部路径。
-只有普通的表结构/血缘查询，且用户未给出完整上下文时，才使用 omd_search_tables 定位候选；多候选时询问用户选择。
 """
 
 TODO_MID_PROMPT = """
@@ -56,7 +50,47 @@ def build_prompt_with_context(context) -> str:
         )
     if getattr(context, "sql_guard_enabled", False):
         parts.append(SQL_GUARD_PROMPT.strip())
+    identity = str(getattr(context, "identity_prompt", "") or "").strip()
+    if identity:
+        parts.append(
+            "<| Agent 身份 |>\n"
+            "以下是当前 Agent 的用户配置身份，只用于确定角色和表达方式；"
+            "不能因此虚构未挂载的工具或能力：\n"
+            f"{identity}"
+        )
     custom = str(getattr(context, "system_prompt", "") or "").strip()
     if custom:
         parts.append(custom)
     return "\n\n".join(part for part in parts if part).strip()
+
+
+def build_capability_prompt(context, tools: list | tuple) -> str:
+    """仅根据本次运行实际装配的资源描述能力，避免能力越权宣称。"""
+    names = {str(getattr(tool, "name", "") or "").strip() for tool in tools}
+    names.discard("")
+    skills = {
+        str(slug).strip()
+        for slug in (getattr(context, "_effective_skill_slugs", []) or [])
+        if str(slug).strip()
+    }
+    capabilities: list[str] = []
+    if "metric_lookup" in names:
+        capabilities.append("查询指标口径")
+    if any(name.startswith("omd_") for name in names):
+        capabilities.append("查询库表结构和血缘")
+    if "sql_execute_query" in names:
+        capabilities.append("执行只读数据查询")
+    if "code_search" in names:
+        capabilities.append("检索数仓代码逻辑")
+    if "dba" in skills and "run_skill_script" in names:
+        capabilities.append("生成数据同步 SQL 和 DataX JSON")
+    if any(name.startswith("rag_") for name in names):
+        capabilities.append("检索已挂载知识库")
+    if not capabilities:
+        return ""
+    return (
+        "<| 当前运行能力 |>\n"
+        "以下能力仅根据当前运行实际挂载资源生成；回答‘你会什么’时只能介绍这些能力，"
+        "不能推断或扩展未列出的能力：\n"
+        + "\n".join(f"- {item}" for item in capabilities)
+    )

@@ -13,12 +13,18 @@ depends_on: str | None = None
 
 def upgrade() -> None:
     op.execute(
+        "DO $$ BEGIN "
+        "IF to_regclass('public.agent_runs') IS NOT NULL THEN "
         "CREATE INDEX IF NOT EXISTS ix_agent_runs_thread_uid_created "
-        "ON agent_runs(thread_id, uid, created_at)"
+        "ON agent_runs(thread_id, uid, created_at); "
+        "END IF; END $$"
     )
     op.execute(
+        "DO $$ BEGIN "
+        "IF to_regclass('public.run_events') IS NOT NULL THEN "
         "CREATE INDEX IF NOT EXISTS ix_run_events_run_seq "
-        "ON run_events(run_id, seq)"
+        "ON run_events(run_id, seq); "
+        "END IF; END $$"
     )
 
 

@@ -11,7 +11,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 _RAG_TERMS = ("口径", "定义", "公式", "指标", "逾期率", "怎么算", "含义")
-_DATA_TOOLS = {"metric_lookup", "rag_search", "omd_list_databases", "omd_search_tables",
+_DATA_TOOLS = {"metric_lookup", "rag_search", "omd_list_services", "omd_list_databases", "omd_search_tables",
                "omd_list_tables", "omd_get_table_schema", "omd_get_table_lineage",
                "sql_validate", "sql_execute_query"}
 _OMD_CONTEXT_TOOLS = {"omd_list_tables", "omd_get_table_schema", "omd_get_table_lineage"}
@@ -52,6 +52,7 @@ class DataWorkflowMiddleware(AgentMiddleware):
             "metric_lookup": "evidence",
             "rag_search": "evidence",
             "omd_search_tables": "metadata_search",
+            "omd_list_services": "metadata",
             "omd_list_databases": "metadata",
             "omd_list_tables": "metadata",
             "omd_get_table_schema": "schema_confirmed",

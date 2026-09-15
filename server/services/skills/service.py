@@ -453,6 +453,17 @@ def get_builtin_skill_specs() -> list[Any]:
     return BUILTIN_SKILLS
 
 
+def is_registered_builtin_skill(item: Skill | dict) -> bool:
+    """判断数据库中的内置 Skill 是否仍由当前代码注册。"""
+    if not is_builtin_skill(item):
+        return True
+    slug = item.get("slug") if isinstance(item, dict) else item.slug
+    return str(slug or "") in {
+        str(getattr(spec, "slug", "")).strip()
+        for spec in get_builtin_skill_specs()
+    }
+
+
 def _build_builtin_skill_dir_path(slug: str) -> str:
     return (Path("shared") / slug).as_posix()
 
@@ -561,12 +572,29 @@ async def list_accessible_skills(
     user: User,
     *,
     require_enabled: bool = True,
+    bypass_share: bool = False,
+    allowed_slugs: set[str] | None = None,
 ) -> list[ResolvedSkill]:
-    """返回当前用户最终生效的共享与个人 Skill。"""
-    shared_items, personal_items = await asyncio.gather(
-        _list_accessible_shared_skills(db, user, require_enabled=require_enabled),
-        list_personal_skills(str(user.uid)),
-    )
+    """返回当前用户最终生效的共享与个人 Skill。
+
+    ``bypass_share`` 仅供已完成 Agent 授权的运行时装配使用；管理页和
+    普通资源接口仍按 Skill 自身共享范围过滤。
+    """
+    if bypass_share and allowed_slugs is not None:
+        repo = SkillRepository(db)
+        all_items = await (repo.list_enabled() if require_enabled else repo.list_all())
+        configured = {str(slug).strip() for slug in allowed_slugs if str(slug).strip()}
+        shared_items = [
+            item for item in all_items
+            if item.slug in configured or is_builtin_skill(item)
+            or user_can_access_skill(user, item, require_enabled=require_enabled)
+        ]
+    else:
+        shared_items = await _list_accessible_shared_skills(
+            db, user, require_enabled=require_enabled
+        )
+    personal_items = await list_personal_skills(str(user.uid))
+    shared_items = [item for item in shared_items if is_registered_builtin_skill(item)]
     personal_by_slug = {item.slug: item for item in personal_items}
 
     effective: dict[str, ResolvedSkill] = {}
@@ -605,6 +633,8 @@ async def list_visible_skills_for_management(db: AsyncSession, user: User) -> li
     seen: set[str] = set()
     for item in await repo.list_all():
         if item.slug in seen:
+            continue
+        if not is_registered_builtin_skill(item):
             continue
         if user_can_manage_skill(user, item) or (item.enabled and user_can_access_skill(user, item)):
             visible.append(item)

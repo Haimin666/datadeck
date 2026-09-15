@@ -28,7 +28,7 @@ from server.services.agent_runtime_contract import (
 from server.services.knowledge_service import list_knowledge_bases
 from server.services.mcp.service import get_all_mcp_servers
 from server.services.skills.service import list_accessible_skills
-from server.deps import get_role_agent_slugs, get_role_permissions
+from server.deps import AGENT_RUNTIME_MODULES, get_role_agent_slugs, get_role_permissions
 from datadeck import logger
 
 
@@ -162,6 +162,20 @@ def record_runtime_diagnostic(context: Any, diagnostic: RuntimeDiagnostic | dict
     current.append(payload)
 
 
+def _resource_diagnostic(resource: RuntimeResource) -> RuntimeDiagnostic | None:
+    """仅把异常资源转成诊断；默认策略跳过是正常状态，不应刷屏。"""
+    if resource.status in {"mounted", "skipped"}:
+        return None
+    return RuntimeDiagnostic(
+        code="RUNTIME_RESOURCE_UNAVAILABLE",
+        message=resource.reason or "运行资源不可用",
+        resource_kind=resource.kind,
+        resource_key=resource.key,
+        severity="warning",
+        recoverable=True,
+    )
+
+
 class AgentRuntimeAssembler:
     """按 uid + Agent Context 生成单次运行的资源快照。"""
 
@@ -195,6 +209,10 @@ class AgentRuntimeAssembler:
         context.tools = policy.merge_tools(getattr(context, "tools", None))
         if policy.backend_id == DATA_AGENT_POLICY.backend_id:
             context.data_workflow_enabled = DATA_AGENT_POLICY.data_workflow
+            # 数仓代码是 DataAgent 的按需能力：代码逻辑类问题才进入本次
+            # 快照，保证资源状态、能力提示和实际工具白名单一致。
+            if getattr(context, "task_kind", "") == "code":
+                context.tools = list(dict.fromkeys([*context.tools, "code_search"]))
 
         try:
             snapshot = await self.assemble(context, db=db, user=user, agent_slug=agent_slug)
@@ -206,15 +224,9 @@ class AgentRuntimeAssembler:
         # event_translator 落库，不能因为快照成功而静默丢失。
         context._runtime_diagnostics = preparation_diagnostics
         for resource in snapshot.resources:
-            if resource.status != "mounted":
-                record_runtime_diagnostic(context, RuntimeDiagnostic(
-                    code="RUNTIME_RESOURCE_UNAVAILABLE",
-                    message=resource.reason or "运行资源不可用",
-                    resource_kind=resource.kind,
-                    resource_key=resource.key,
-                    severity="warning",
-                    recoverable=True,
-                ))
+            diagnostic = _resource_diagnostic(resource)
+            if diagnostic is not None:
+                record_runtime_diagnostic(context, diagnostic)
         self.apply_knowledge_context(context, snapshot)
 
         try:
@@ -352,8 +364,28 @@ class AgentRuntimeAssembler:
         agent_slug: str,
     ) -> RuntimeResourceSnapshot:
         started = monotonic()
-        permissions = tuple(await get_role_permissions(db, user.role))
+        role_permissions = set(await get_role_permissions(db, user.role))
+        assigned_agents = (
+            await get_role_agent_slugs(db, user.role)
+            if hasattr(db, "get")
+            else set()
+        )
+        if assigned_agents is None or agent_slug in assigned_agents:
+            role_permissions.update(AGENT_RUNTIME_MODULES)
+            context.agent_resource_access = True
+        else:
+            context.agent_resource_access = False
+        permissions = tuple(sorted(role_permissions))
         context.runtime_permissions = permissions
+        configured_knowledge_ids: set[str] = set()
+        if getattr(context, "agent_resource_access", False) and hasattr(db, "scalar"):
+            agent = await db.scalar(select(Agent).where(Agent.slug == agent_slug))
+            raw_config = (agent.config_json or {}).get("context", agent.config_json or {}) if agent else {}
+            configured = raw_config.get("knowledges") if isinstance(raw_config, dict) else None
+            if isinstance(configured, (list, tuple, set)):
+                configured_knowledge_ids = {
+                    str(item).strip() for item in configured if str(item).strip()
+                }
         # 工作区对象可能已由运行入口按会话绑定创建，但没有 workspace 模块权限时
         # 不能把路径继续带入快照，也不能让后续工具看到它。
         if "workspace" not in permissions:
@@ -363,7 +395,12 @@ class AgentRuntimeAssembler:
         tool_selection = _selected(getattr(context, "tools", None))
         skill_selection = _selected(getattr(context, "skills", None))
         skill_items = (
-            [item for item in await list_accessible_skills(db, user) if item.slug]
+            [item for item in await list_accessible_skills(
+                db,
+                user,
+                bypass_share=bool(getattr(context, "agent_resource_access", False)),
+                allowed_slugs=(set(skill_selection) if skill_selection is not None else None),
+            ) if item.slug]
             if "extensions" in permissions else []
         )
         selections = {
@@ -415,7 +452,11 @@ class AgentRuntimeAssembler:
         ))
 
         knowledge_items = (
-            await list_knowledge_bases(db, str(user.uid))
+            await list_knowledge_bases(
+                db,
+                str(user.uid),
+                allowed_ids=configured_knowledge_ids,
+            )
             if "knowledge" in permissions else []
         )
         knowledge_resources = [RuntimeResource(
@@ -464,6 +505,15 @@ class AgentRuntimeAssembler:
         subagent_items = []
         if "agents" in permissions:
             allowed_agent_slugs = await get_role_agent_slugs(db, user.role)
+            # 子 Agent 是父 Agent 的运行时资源。用户被分配父 Agent 后，父
+            # Agent 显式挂载的子 Agent 不要求再次出现在角色管理白名单中；
+            # 未显式挂载的资源仍受角色白名单约束。
+            configured_subagent_slugs = set(selections["subagents"] or ())
+            if getattr(context, "agent_resource_access", False) and configured_subagent_slugs:
+                allowed_agent_slugs = (
+                    None if allowed_agent_slugs is None
+                    else set(allowed_agent_slugs) | configured_subagent_slugs
+                )
             subagent_query = select(Agent).where(Agent.execution_role == "subagent")
             if allowed_agent_slugs is not None:
                 subagent_query = subagent_query.where(Agent.slug.in_(allowed_agent_slugs))

@@ -138,6 +138,46 @@ class TestThreadsApi:
         assert second.json()["id"] == first.json()["id"]
         assert second.json()["request_id"] == payload["request_id"]
 
+    def test_temporary_thread_does_not_require_workspace_project(self, app_client):
+        """没有 workspace 模块时，已分配 Agent 的用户仍可创建临时会话。"""
+        admin_headers = _login(app_client)
+        role = app_client.post(
+            "/api/auth/roles",
+            json={
+                "slug": "temporary-chat-role",
+                "name": "临时对话角色",
+                "permissions": ["conversations"],
+                "agent_slugs": ["default-chatbot"],
+            },
+            headers=admin_headers,
+        )
+        assert role.status_code == 200, role.text
+        user = app_client.post(
+            "/api/auth/users",
+            json={
+                "username": "temporary-chat-user",
+                "password": "password123",
+                "role": "temporary-chat-role",
+            },
+            headers=admin_headers,
+        )
+        assert user.status_code == 200, user.text
+        login = app_client.post(
+            "/api/auth/token",
+            data={"username": "temporary-chat-user", "password": "password123"},
+        )
+        assert login.status_code == 200, login.text
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+        created = app_client.post(
+            "/api/chat/thread",
+            json={"agent_id": "default-chatbot", "project_id": "not-allowed"},
+            headers=headers,
+        )
+
+        assert created.status_code == 200, created.text
+        assert created.json()["project_id"] is None
+
     def test_thread_crud(self, app_client):
         headers = _login(app_client)
         created = app_client.post(
@@ -263,6 +303,98 @@ class TestThreadsApi:
         assert res.status_code == 200
         body = res.json()
         assert body["history"] == []
+
+    def test_history_preserves_persisted_message_timestamps(self, app_client):
+        import psycopg
+        import uuid
+
+        headers = _login(app_client)
+        thread = app_client.post(
+            "/api/chat/thread",
+            json={"agent_id": "default-chatbot", "title": "时间线"},
+            headers=headers,
+        ).json()
+        run_id = str(uuid.uuid4())
+        request_id = str(uuid.uuid4())
+        with psycopg.connect("postgresql://localhost:5432/datadeck_test", autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO agent_runs "
+                "(id, thread_id, uid, agent_slug, status, source, channel, request_id, "
+                "input_payload, token_usage, created_at, updated_at) "
+                "VALUES (%s, %s, 'admin', 'default-chatbot', 'completed', 'web', 'web', "
+                "%s, %s::jsonb, '{}'::jsonb, TIMESTAMP '2026-01-01 12:00:00', "
+                "TIMESTAMP '2026-01-01 12:00:02')",
+                (run_id, thread["id"], request_id, '{"query":"历史问题"}'),
+            )
+            conn.execute(
+                "INSERT INTO run_events "
+                "(id, run_id, event_type, payload, thread_id, created_at) "
+                "VALUES (%s, %s, 'messages', %s::jsonb, %s, "
+                "TIMESTAMP '2026-01-01 12:00:03')",
+                (
+                    str(uuid.uuid4()),
+                    run_id,
+                    '{"chunk":{"stream_event":{"type":"message_delta","content":"历史回答"}}}',
+                    thread["id"],
+                ),
+            )
+
+        response = app_client.get(f"/api/chat/thread/{thread['id']}/history", headers=headers)
+
+        assert response.status_code == 200, response.text
+        history = response.json()["history"]
+        assert history[0]["created_at"].startswith("2026-01-01T12:00:00")
+        assert history[1]["created_at"].startswith("2026-01-01T12:00:03")
+
+    def test_history_orders_runs_deterministically_when_created_at_matches(self, app_client):
+        import psycopg
+        import uuid
+
+        headers = _login(app_client)
+        thread = app_client.post(
+            "/api/chat/thread",
+            json={"agent_id": "default-chatbot", "title": "稳定排序"},
+            headers=headers,
+        ).json()
+        created_at = "2026-01-01 12:00:00"
+        run_ids = ["run-history-order-a", "run-history-order-b"]
+        with psycopg.connect("postgresql://localhost:5432/datadeck_test", autocommit=True) as conn:
+            for index, run_id in enumerate(run_ids):
+                conn.execute(
+                    "INSERT INTO agent_runs "
+                    "(id, thread_id, uid, agent_slug, status, source, channel, request_id, "
+                    "input_payload, token_usage, created_at, updated_at) "
+                    "VALUES (%s, %s, 'admin', 'default-chatbot', 'completed', 'web', 'web', "
+                    "%s, %s::jsonb, '{}'::jsonb, %s, %s)",
+                    (
+                        run_id,
+                        thread["id"],
+                        str(uuid.uuid4()),
+                        '{"query":"问题%d"}' % index,
+                        created_at,
+                        created_at,
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO run_events "
+                    "(id, run_id, event_type, payload, thread_id, created_at) "
+                    "VALUES (%s, %s, 'messages', %s::jsonb, %s, %s)",
+                    (
+                        str(uuid.uuid4()),
+                        run_id,
+                        '{"chunk":{"stream_event":{"type":"message_delta","content":"回答%d"}}}' % index,
+                        thread["id"],
+                        "2026-01-01 12:00:01",
+                    ),
+                )
+
+        response = app_client.get(f"/api/chat/thread/{thread['id']}/history", headers=headers)
+
+        assert response.status_code == 200, response.text
+        history = response.json()["history"]
+        assert [item["content"] for item in history] == [
+            "问题0", "回答0", "问题1", "回答1",
+        ]
 
 
 class TestRunsApi:

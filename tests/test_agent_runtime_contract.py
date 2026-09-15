@@ -146,6 +146,34 @@ async def test_mcp_discovery_diagnostic_redacts_url_credentials(monkeypatch):
     assert "https://mcp.internal:3000/<redacted>" in message
 
 
+@pytest.mark.asyncio
+async def test_mcp_discovery_mounts_only_snapshot_selected_servers(monkeypatch):
+    import server.services.mcp.service as mcp_service
+
+    async def discover(server_slug):
+        return [SimpleNamespace(name=f"{server_slug}_tool")]
+
+    monkeypatch.setattr(mcp_service, "get_mcp_tools", discover, raising=False)
+    context = SimpleNamespace(
+        _runtime_snapshot=make_snapshot(
+            selections={"mcps": ("analytics",)},
+            resources=(
+                RuntimeResource(kind="mcps", key="analytics", source="postgres"),
+                RuntimeResource(kind="mcps", key="other", source="postgres"),
+            ),
+        ),
+        _runtime_diagnostics=[],
+    )
+
+    result = await AgentRuntimeAssembler.resolve_mcp_tools_by_server(
+        context, extra_mcps=["analytics", "other", "unmounted"],
+    )
+
+    assert list(result) == ["analytics"]
+    assert result["analytics"][0].name == "analytics_tool"
+    assert context._runtime_diagnostics == []
+
+
 def test_runtime_diagnostic_and_tool_descriptor_are_serializable():
     from server.services.agent_runtime_contract import RuntimeDiagnostic, ToolDescriptor
 
@@ -205,6 +233,23 @@ def test_default_tool_snapshot_marks_only_default_tools_as_mounted():
     assert [item.key for item in result if item.status == "mounted"] == ["echo"]
     assert result[1].status == "skipped"
     assert result[1].reason == "默认策略未挂载"
+
+
+def test_default_policy_skips_do_not_become_runtime_error_diagnostics():
+    from server.services.agent_runtime_assembler import _resource_diagnostic
+
+    skipped = RuntimeResource(
+        kind="tools", key="package:sql", status="skipped", reason="默认策略未挂载",
+    )
+    unavailable = RuntimeResource(
+        kind="tools", key="package:mcp:missing", status="unavailable", reason="MCP 未发现",
+    )
+
+    assert _resource_diagnostic(skipped) is None
+    diagnostic = _resource_diagnostic(unavailable)
+    assert diagnostic is not None
+    assert diagnostic.code == "RUNTIME_RESOURCE_UNAVAILABLE"
+    assert diagnostic.message == "MCP 未发现"
 
 
 def test_scheduled_task_snapshot_honors_explicit_selection():

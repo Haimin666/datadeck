@@ -13,6 +13,9 @@ from datadeck.agents.toolkits.registry import (
     register_tool,
     unregister_tool,
 )
+from datadeck.agents.toolkits.service import get_tool_metadata
+from server.routers.agent_router import _configurable_items
+from server.services.agent_runtime_tools import TOOL_REQUIRED_MODULES
 
 
 def test_package_descriptor_uses_one_canonical_shape():
@@ -24,6 +27,19 @@ def test_package_descriptor_uses_one_canonical_shape():
     omd = next(item for item in options if item["slug"] == "package:omd")
     assert omd["fixed"] is True
     assert omd["configurable"] is False
+
+
+def test_platform_package_is_fixed_for_both_builtin_agent_editors():
+    for backend_id in ("ChatbotAgent", "DataAgent"):
+        options = _configurable_items(backend_id=backend_id)["tools"]["options"]
+        platform = next(item for item in options if item["slug"] == "package:platform")
+        assert platform["fixed"] is True
+        assert platform["configurable"] is False
+
+
+def test_registered_tools_have_runtime_module_guards():
+    registered = {item["slug"] for item in get_tool_metadata() if item.get("slug")}
+    assert registered <= set(TOOL_REQUIRED_MODULES)
 
 
 def test_package_selection_expands_and_deduplicates():

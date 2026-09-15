@@ -1,6 +1,6 @@
 """任务分类路由（阶段二 2.2）：确定性关键词预分类，注入 prompt 辅助工具选择。
 
-五类：sync（同步）/ metric（口径）/ schema（结构）/ data（取数）/ chat（闲聊）。
+六类：sync（同步）/ metric（口径）/ schema（结构）/ data（取数）/ code（代码逻辑）/ chat（闲聊）。
 纯规则、零 LLM 成本；分类不确定时返回 None，不干扰模型自主决策。
 """
 
@@ -17,12 +17,19 @@ SCHEMA_PAT = re.compile(
 DATA_PAT = re.compile(
     r"查询|查一下|帮我查|多少|几条|统计|汇总|列出|取数|明细|count|sum|avg|group by|最近|top"
 )
+CODE_PAT = re.compile(
+    r"数仓代码|代码逻辑|任务脚本|脚本逻辑|SQL实现|SQL逻辑|字段来源代码|代码注释|脚本注释|SQL注释|注释逻辑|调度逻辑",
+    re.IGNORECASE,
+)
 SYNC_PAT = re.compile(r"同步|db2hive|datax|data.?x|建数仓表|生成同步", re.IGNORECASE)
-CHAT_PAT = re.compile(r"^(你好|您好|hi|hello|嗨|在吗|谢谢|你是谁|介绍一下你自己)", re.IGNORECASE)
+CHAT_PAT = re.compile(
+    r"^(?:你好|您好|hi|hello|嗨|在吗|谢谢|你是谁|介绍一下你自己)[\s，。！？!?,.！]*$",
+    re.IGNORECASE,
+)
 
 
 def classify_query(query: str) -> str | None:
-    """返回 metric/schema/data/chat；无法确定返回 None。"""
+    """返回 sync/metric/schema/data/code/chat；无法确定返回 None。"""
     q = (query or "").strip()
     if not q:
         return None
@@ -30,6 +37,8 @@ def classify_query(query: str) -> str | None:
         return "chat"
     if SYNC_PAT.search(q):
         return "sync"
+    if CODE_PAT.search(q):
+        return "code"
     if METRIC_PAT.search(q):
         return "metric"
     if SCHEMA_PAT.search(q):
@@ -44,6 +53,7 @@ _HINTS = {
     "metric": "本问题判定为【口径/概念类】→ 优先 rag_search 检索知识库作答，检索无果再通用回答。",
     "schema": "本问题判定为【表结构/元数据类】→ 优先 omd_* 工具查询真实元数据，禁止凭记忆编表名字段。",
     "data": "本问题判定为【取数类】→ 先 omd_get_table_schema 确认结构，再 sql_execute_query 执行并给出真实数值。",
+    "code": "本问题判定为【代码逻辑类】→ 按需使用 code_search 检索已授权数仓代码和注释；不要用 RAG 猜测原始代码。",
     "chat": "本问题判定为【闲聊类】→ 直接回答，不要调用任何工具。",
 }
 

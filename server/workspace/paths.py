@@ -81,8 +81,8 @@ def normalize_managed_workdir_path(workdir_path: str) -> str:
 def workspace_uid_dirname(uid: str) -> str:
     """Return a path-safe, stable workspace directory name for a logical UID.
 
-    Database and OIDC subject identifiers may contain characters such as ``:``
-    that are valid identity data but unsafe in filesystem path components.
+    Database and external identity identifiers may contain characters such as
+    ``:`` that are valid identity data but unsafe in filesystem path components.
     Legacy simple UIDs retain their directory name; all other values use a
     namespaced SHA-256 digest at the filesystem boundary only.
     """

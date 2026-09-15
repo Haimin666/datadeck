@@ -33,33 +33,28 @@ class AgentPolicy:
 
 # 两类内置 Agent 都默认具备平台基础能力；数据分析专属能力仍只由
 # DATA_AGENT_POLICY 固定挂载，用户可配置工具只负责在此基础上追加能力。
-COMMON_PLATFORM_TOOLS = (
-    "workspace_list_directory", "workspace_search_files", "workspace_read_file",
-    "workspace_write_file", "execute", "run_skill_script", "read_file",
-    "read_attachment", "present_artifacts", "ask_user_question",
-    "scheduled_task_list", "scheduled_task_create", "scheduled_task_update",
-    "scheduled_task_delete",
-)
+COMMON_PLATFORM_PACKAGE = "package:platform"
 
 CHATBOT_POLICY = AgentPolicy(
     backend_id="ChatbotAgent",
-    fixed_tools=COMMON_PLATFORM_TOOLS,
+    fixed_packages=(COMMON_PLATFORM_PACKAGE,),
 )
 
 # DataAgent 的数据能力不可从 Agent 编辑页移除；真实运行工具保持明确顺序，
 # 便于提示词、工作流门控和回归测试稳定。
 DATA_AGENT_POLICY = AgentPolicy(
     backend_id="DataAgent",
-    fixed_tools=(
-        *COMMON_PLATFORM_TOOLS,
-        "metric_lookup", "rag_search", "omd_list_databases", "omd_search_tables",
-        "omd_list_tables", "omd_get_table_schema", "omd_get_table_lineage",
-        "sql_validate", "sql_execute_query", "ask_user_question",
+    fixed_packages=(
+        COMMON_PLATFORM_PACKAGE,
+        "package:knowledge",
+        "package:omd",
+        "package:sql",
     ),
-    fixed_packages=("package:knowledge", "package:omd", "package:sql"),
     data_workflow=True,
     allow_delegation=False,
 )
 
 
-__all__ = ["AgentPolicy", "CHATBOT_POLICY", "DATA_AGENT_POLICY"]
+__all__ = [
+    "AgentPolicy", "CHATBOT_POLICY", "COMMON_PLATFORM_PACKAGE", "DATA_AGENT_POLICY",
+]

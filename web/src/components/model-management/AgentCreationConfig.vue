@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
+import AgentResourceSelector from '@/components/model-management/AgentResourceSelector.vue'
 
 const props = defineProps({
   configurableItems: { type: Object, default: () => ({}) },
@@ -45,20 +46,28 @@ const optionsFor = (key) =>
       </a-form-item>
 
       <a-form-item
+        label="Agent 身份"
+        :help="configurableItems.identity_prompt?.description"
+      >
+        <a-textarea
+          :value="modelValue.identity_prompt || ''"
+          :rows="4"
+          placeholder="可选。留空时使用中性身份，不主动介绍固定能力。"
+          @update:value="(value) => update('identity_prompt', value)"
+        />
+      </a-form-item>
+
+      <a-form-item
         v-for="key in resourceKeys"
         :key="key"
         :label="configurableItems[key]?.name"
         :help="configurableItems[key]?.description"
       >
-        <a-select
-          :value="modelValue[key] || []"
-          mode="multiple"
-          allow-clear
-          show-search
-          :placeholder="`选择${configurableItems[key]?.name || '资源'}`"
+        <AgentResourceSelector
+          :model-value="modelValue[key] || []"
           :options="optionsFor(key)"
-          :filter-option="(input, option) => String(option?.label || '').toLowerCase().includes(input.toLowerCase())"
-          @update:value="(value) => update(key, value)"
+          :placeholder="`选择${configurableItems[key]?.name || '资源'}`"
+          @update:model-value="(value) => update(key, value)"
         />
       </a-form-item>
     </a-form>

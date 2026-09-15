@@ -112,6 +112,8 @@
                   v-if="row.artifacts.length"
                   :artifacts="row.artifacts"
                   :thread-id="currentChatId"
+                  :preview-enabled="canViewWorkspaceFiles"
+                  :save-enabled="canViewWorkspaceFiles"
                   @saved="handleArtifactSaved"
                   @open-preview="openPanelPreview"
                 />
@@ -283,13 +285,14 @@
                   >
                     <template #extra>
                       <ProjectSelectionSection
-                        v-if="!currentChatId"
+                        v-if="!currentChatId && canSelectProject"
                         v-model="selectedProjectId"
                         :disabled="threadCreationInFlight"
                       />
                     </template>
                     <template #actions-left-extra>
                       <ToolApprovalModeSelector
+                        v-if="canConfigureApproval"
                         :model-value="currentToolApprovalMode"
                         @update:model-value="handleToolApprovalModeSelect"
                       />
@@ -349,7 +352,8 @@
         </div>
 
         <div
-          id="agent-state-panel"
+        v-if="canViewWorkspaceFiles"
+        id="agent-state-panel"
           class="side-panel side-panel--state"
           :class="{
             'is-visible': statePanelOpen,
@@ -806,6 +810,7 @@
       </div>
 
       <div
+        v-if="canViewWorkspaceFiles"
         id="agent-file-panel"
         class="side-panel side-panel--file"
         ref="panelWrapperRef"
@@ -959,14 +964,16 @@ const chatUIStore = useChatUIStore()
 const configStore = useConfigStore()
 const infoStore = useInfoStore()
 const userStore = useUserStore()
+const canSelectProject = computed(() => userStore.canAccess('workspace'))
+const canConfigureApproval = computed(() => userStore.canAccess('extensions'))
+const canViewWorkspaceFiles = computed(() => userStore.canAccess('workspace'))
 const messageDebugEnabled = computed(() => infoStore.debugMode && userStore.isSuperAdmin)
 const {
   agents,
   selectedAgentId,
   agentConfig,
   configurableItems,
-  availableKnowledgeBases,
-  availableSkills
+  availableKnowledgeBases
 } =
   storeToRefs(agentStore)
 const { threads, currentThreadId, currentThread, threadCreationInFlight } =
@@ -1230,6 +1237,10 @@ const resetAgentPanelState = () => {
   agentPanelSections.value = [FILE_TREE_SECTION]
   agentPanelActiveSectionKey.value = FILE_TREE_SECTION.key
 }
+
+watch(canViewWorkspaceFiles, (visible) => {
+  if (!visible && isFilePanelOpen.value) resetAgentPanelState()
+})
 
 const previewCacheKey = (path, threadId = currentChatId.value) => `${threadId}:${path}`
 
@@ -1900,8 +1911,12 @@ const totalTodoCount = computed(() => currentTodos.value.length)
 const completedTodoCount = computed(
   () => currentTodos.value.filter((todo) => todo?.status === 'completed').length
 )
-const showStateEntry = computed(() => Boolean(currentChatId.value))
-const showFileEntry = computed(() => Boolean(currentChatId.value))
+const showStateEntry = computed(
+  () => Boolean(currentChatId.value) && canViewWorkspaceFiles.value
+)
+const showFileEntry = computed(
+  () => Boolean(currentChatId.value) && canViewWorkspaceFiles.value
+)
 const hasVisibleStateSections = computed(
   () =>
     Boolean(currentTokenUsage.value) ||
@@ -1916,8 +1931,6 @@ const { mentionConfig } = useAgentMentionConfig({
   currentThreadAttachments,
   configurableItems,
   agentConfig,
-  availableKnowledgeBases,
-  availableSkills
 })
 
 const currentThreadMessages = computed(() => threadMessages.value[currentChatId.value] || [])
@@ -2359,6 +2372,7 @@ const activeAgentPanelPreview = computed(() =>
 )
 const agentPanelFilesystemVisible = computed(
   () =>
+    canViewWorkspaceFiles.value &&
     isFilePanelOpen.value &&
     (activeAgentPanelSection.value?.type === 'file-tree' ||
       (activeAgentPanelSection.value?.type === 'file' &&

@@ -25,14 +25,26 @@ from datadeck.agents.policy import DATA_AGENT_POLICY
 
 
 TOOL_REQUIRED_MODULES = {
+    "echo": "conversations",
+    "add": "conversations",
     "execute": "workspace",
     "run_skill_script": "extensions",
-    "present_artifacts": "workspace",
+    # 生成物通过当前对话展示/下载，不要求用户拥有个人空间模块权限。
+    "present_artifacts": "conversations",
     "read_file": "extensions",
     "read_attachment": "conversations",
     "rag_search": "knowledge",
     "code_search": "knowledge",
     "metric_lookup": "metrics",
+    "omd_list_services": "knowledge",
+    "omd_list_databases": "knowledge",
+    "omd_search_tables": "knowledge",
+    "omd_list_tables": "knowledge",
+    "omd_get_table_schema": "knowledge",
+    "omd_get_table_lineage": "knowledge",
+    "sql_validate": "knowledge",
+    "sql_execute_query": "knowledge",
+    "ask_user_question": "conversations",
     "workspace_list_directory": "workspace",
     "workspace_search_files": "workspace",
     "workspace_read_file": "workspace",
@@ -94,6 +106,17 @@ def build_knowledge_search_tool(context, user: User, base_tool):
         for item in (getattr(context, "knowledge_base_collections", []) or [])
         if str(item).strip()
     }
+    runtime_snapshot = getattr(context, "_runtime_snapshot", None)
+    # Agent 的显式挂载授权已经在宿主侧写入不可变快照。工具层必须使用这份
+    # 白名单，不能再用当前用户 ACL 覆盖已授权的私有知识库。
+    allowed_knowledge_base_ids = (
+        {
+            str(item.key)
+            for item in runtime_snapshot.mounted_resources("knowledges")
+            if str(item.key).strip()
+        }
+        if runtime_snapshot is not None else None
+    )
 
     async def rag_search(
         query: str, top_k: int = 5, domain: str = "", collection_name: str = "",
@@ -117,16 +140,24 @@ def build_knowledge_search_tool(context, user: User, base_tool):
         except (TypeError, ValueError):
             safe_top_k = 5
         async with session_context() as db:
-            rows = (await db.execute(select(KnowledgeBase).where(
-                KnowledgeBase.collection_name.in_(targets),
-                or_(KnowledgeBase.uid == str(user.uid),
-                    KnowledgeBase.access_scope.in_(("shared", "public"))),
-            ))).scalars().all()
+            db_query = select(KnowledgeBase).where(KnowledgeBase.collection_name.in_(targets))
+            if allowed_knowledge_base_ids is not None:
+                # targets 已通过 collection 白名单校验，ID 过滤用于防止历史
+                # 重复 collection 或模型构造参数越过当前运行快照。
+                db_query = db_query.where(KnowledgeBase.id.in_(allowed_knowledge_base_ids))
+            else:
+                # 没有宿主快照的 standalone 调用仍必须走用户 ACL。
+                db_query = db_query.where(or_(
+                    KnowledgeBase.uid == str(user.uid),
+                    KnowledgeBase.access_scope.in_(("shared", "public")),
+                ))
+            rows = (await db.execute(db_query)).scalars().all()
             result_rows = []
             strategies = set()
             for knowledge_base in rows:
                 result = await search_knowledge_base(
                     db, str(user.uid), knowledge_base.id, query, safe_top_k,
+                    authorized_kb_ids=allowed_knowledge_base_ids,
                 )
                 strategies.add(result.get("strategy", "unknown"))
                 for item in result.get("results", []):
@@ -161,6 +192,11 @@ def summarize_subagent_results(results: dict[str, dict]) -> dict:
 
 
 def build_agent_runtime_tools(context, user: User) -> list:
+    # 纯闲聊不需要宿主工具；即使模型误解提示词，也不会触发文件、
+    # 定时任务或扩展调用。
+    if getattr(context, "task_kind", "") == "chat":
+        return []
+
     allowed_skills = set(getattr(context, "_effective_skill_slugs", []) or [])
     parent_thread_id = str(getattr(context, "thread_id", "") or "")
     parent_run_id = str(getattr(context, "run_id", "") or "")
@@ -376,9 +412,21 @@ def build_agent_runtime_tools(context, user: User) -> list:
             return {"ok": False, "error": "limit 必须是整数"}
         suffixes = {".sql", ".hql", ".py", ".sh", ".yaml", ".yml", ".json", ".md", ".txt", ".java", ".scala", ".js", ".ts"}
         async with session_context() as db:
-            stmt = select(CodeRepository).join(KnowledgeBase, CodeRepository.kb_id == KnowledgeBase.id).where(
-                or_(KnowledgeBase.uid == str(user.uid), KnowledgeBase.access_scope.in_(("shared", "public")))
-            )
+            stmt = select(CodeRepository).join(KnowledgeBase, CodeRepository.kb_id == KnowledgeBase.id)
+            runtime_snapshot = getattr(context, "_runtime_snapshot", None)
+            if runtime_snapshot is not None:
+                allowed_kb_ids = {
+                    str(item.key)
+                    for item in runtime_snapshot.mounted_resources("knowledges")
+                    if str(item.key).strip()
+                }
+                stmt = stmt.where(CodeRepository.kb_id.in_(allowed_kb_ids))
+            else:
+                # 没有宿主快照的 standalone 调用仍必须走用户 ACL。
+                stmt = stmt.where(or_(
+                    KnowledgeBase.uid == str(user.uid),
+                    KnowledgeBase.access_scope.in_(("shared", "public")),
+                ))
             if repository_id:
                 stmt = stmt.where(CodeRepository.id == str(repository_id))
             repositories = (await db.execute(stmt)).scalars().all()
@@ -402,7 +450,7 @@ def build_agent_runtime_tools(context, user: User) -> list:
             for file_path in file_paths:
                 if len(results) >= safe_limit:
                     break
-                if not file_path.is_file() or file_path.suffix.lower() not in suffixes:
+                if file_path.is_symlink() or not file_path.is_file() or file_path.suffix.lower() not in suffixes:
                     continue
                 relative = file_path.relative_to(base)
                 if any(part in {".git", "node_modules", "venv", ".venv", "__pycache__", "dist", "build"} for part in relative.parts):
@@ -605,7 +653,11 @@ def build_agent_runtime_tools(context, user: User) -> list:
             raise ValueError("该子智能体未被当前 Agent 授权")
         async with session_context() as db:
             role_agents = await get_role_agent_slugs(db, user.role)
-            if role_agents is not None and slug not in role_agents:
+            if (
+                role_agents is not None
+                and slug not in role_agents
+                and slug not in configured_subagents
+            ):
                 raise ValueError("当前角色未分配该子智能体")
             agent = await db.scalar(select(Agent).where(
                 Agent.slug == slug,
@@ -857,13 +909,17 @@ def build_agent_runtime_tools(context, user: User) -> list:
             "subagent_start", "subagent_status", "subagent_events", "subagent_cancel",
             "subagent_await", "subagent_orchestrate",
         })
-    if (
-        getattr(context, "agent_backend_id", "") == "DataAgent"
-        or "metric_lookup" in configured_tool_names
-    ):
+    is_data_agent = getattr(context, "agent_backend_id", "") == "DataAgent"
+    code_search_enabled = (
+        getattr(context, "task_kind", "") == "code"
+        if is_data_agent
+        else "code_search" in configured_tool_names
+    )
+    if is_data_agent or "metric_lookup" in configured_tool_names:
         # DataAgent 固定能力或显式选择 package:knowledge 时启用指标口径查询。
         allowed.add("metric_lookup")
-        allowed.add("code_search")
+        if code_search_enabled:
+            allowed.add("code_search")
     elif "code_search" in configured_tool_names:
         allowed.add("code_search")
     tools = [
