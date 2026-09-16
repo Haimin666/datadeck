@@ -39,6 +39,15 @@ class DataWorkflowMiddleware(AgentMiddleware):
                 "phase": "intent",
                 "evidence": [],
                 "steps": [],
+                # Compact, checkpoint-friendly facts.  Never copy complete tool
+                # responses here: those belong in the message/tool transcript.
+                "facts": {
+                    "confirmed_tables": [],
+                    "sources": [],
+                    "tool_evidence": [],
+                    "artifacts": [],
+                    "failure_reasons": [],
+                },
             }
             setattr(context, "_data_workflow", workflow)
         return workflow
@@ -84,6 +93,37 @@ class DataWorkflowMiddleware(AgentMiddleware):
                 return {}
             return value if isinstance(value, dict) else {}
         return {}
+
+    @classmethod
+    def _record_facts(cls, workflow: dict[str, Any], tool_name: str, result: Any) -> None:
+        """Persist small, stable facts so compression cannot erase task progress."""
+        facts = workflow.setdefault("facts", {})
+        confirmed_tables = facts.setdefault("confirmed_tables", [])
+        evidence = facts.setdefault("tool_evidence", [])
+        payload = cls._tool_payload(result)
+        evidence.append({
+            "tool": tool_name,
+            "ok": True,
+            "keys": sorted(str(key) for key in payload if key in {
+                "service_name", "database", "schema", "table", "table_name",
+                "source", "source_type", "document_id", "path", "commit",
+            }),
+        })
+        for key in ("service_name", "database", "schema", "table", "table_name"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                confirmed_tables.append(value.strip())
+        source = {
+            "metric_lookup": "ossie",
+            "rag_search": "rag",
+            "omd_get_table_schema": "omd_schema",
+            "omd_get_table_lineage": "omd_lineage",
+        }.get(tool_name)
+        if source and source not in facts.setdefault("sources", []):
+            facts["sources"].append(source)
+        # Keep the state bounded even if a model loops over tools.
+        facts["tool_evidence"] = evidence[-50:]
+        facts["confirmed_tables"] = list(dict.fromkeys(confirmed_tables))[-100:]
 
     async def awrap_tool_call(
         self,
@@ -146,6 +186,7 @@ class DataWorkflowMiddleware(AgentMiddleware):
             return result
 
         self._record(workflow, tool_name)
+        self._record_facts(workflow, tool_name, result)
         if tool_name == "metric_lookup":
             workflow.setdefault("evidence", []).append("ossie")
         if tool_name == "rag_search":

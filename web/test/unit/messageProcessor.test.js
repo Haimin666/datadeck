@@ -56,3 +56,24 @@ test('上下文压缩事件显示为历史时间线中的系统分界消息', ()
   assert.equal(conversations[0].messages[2].type, 'system')
   assert.match(conversations[0].messages[2].content, /上下文已压缩/)
 })
+
+test('历史 AI 消息中的自动交付物可恢复', () => {
+  const conversations = MessageProcessor.convertServerHistoryToMessages([
+    { type: 'human', content: '生成文件' },
+    { type: 'ai', content: '已生成', artifacts: ['/outputs/request-7/result.json'] }
+  ])
+
+  assert.deepEqual(
+    MessageProcessor.extractArtifactsFromConversation(conversations[0]),
+    ['/outputs/request-7/result.json']
+  )
+})
+
+test('消息块包含空值时不会导致对话渲染崩溃', () => {
+  assert.equal(MessageProcessor.mergeMessageChunk([]), null)
+  assert.equal(MessageProcessor.mergeMessageChunk([undefined, null]), null)
+  assert.deepEqual(
+    MessageProcessor.mergeMessageChunk([undefined, { type: 'ai', content: '正常' }]),
+    { type: 'ai', content: '正常' }
+  )
+})

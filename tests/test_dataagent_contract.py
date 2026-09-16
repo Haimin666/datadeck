@@ -371,6 +371,31 @@ async def test_data_workflow_persists_steps_and_evidence_after_tool_success():
 
 
 @pytest.mark.asyncio
+async def test_data_workflow_keeps_compact_structured_facts():
+    middleware = DataWorkflowMiddleware()
+    context = type("Context", (), {"task_kind": "data"})()
+    runtime = type("Runtime", (), {"context": context})()
+    request = type("Request", (), {
+        "runtime": runtime,
+        "tool_call": {"id": "call-schema", "name": "omd_get_table_schema",
+                       "args": {"service_name": "hive"}},
+    })()
+
+    async def handler(_request):
+        return ToolMessage(
+            content=json.dumps({"service_name": "hive", "columns": ["very-large-payload"]}),
+            tool_call_id="call-schema",
+        )
+
+    result = await middleware.awrap_tool_call(request, handler)
+    facts = result.update["data_workflow"]["facts"]
+    assert facts["confirmed_tables"] == ["hive"]
+    assert facts["sources"] == ["omd_schema"]
+    assert facts["tool_evidence"] == [{"tool": "omd_get_table_schema", "ok": True,
+                                       "keys": ["service_name"]}]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("candidates, expected", [([], True), ([{"table": "one"}], False)])
 async def test_data_workflow_marks_omd_search_selection_for_zero_or_single_candidate(
     candidates, expected,

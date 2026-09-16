@@ -44,6 +44,8 @@ class ModelInfo:
     # Embedding 专属
     dimension: int | None = None
     batch_size: int = 40
+    context_window: int | None = None
+    max_output_tokens: int | None = None
 
     @property
     def spec(self) -> str:
@@ -64,6 +66,8 @@ class ModelInfo:
             "request_body_overrides": self.request_body_overrides,
             "dimension": self.dimension,
             "batch_size": self.batch_size,
+            "context_window": self.context_window,
+            "max_output_tokens": self.max_output_tokens,
         }
 
     @classmethod
@@ -82,6 +86,8 @@ class ModelInfo:
             request_body_overrides=data.get("request_body_overrides", {}),
             dimension=data.get("dimension"),
             batch_size=data.get("batch_size", 40),
+            context_window=data.get("context_window"),
+            max_output_tokens=data.get("max_output_tokens"),
         )
 
 
@@ -167,6 +173,8 @@ class ModelCache:
                     request_body_overrides=dict(model.get("request_body_overrides") or {}),
                     dimension=model.get("dimension"),
                     batch_size=model.get("batch_size", 40),
+                    context_window=model.get("context_window") or model.get("context_length"),
+                    max_output_tokens=model.get("max_output_tokens") or model.get("max_completion_tokens"),
                 )
                 new_cache[info.spec] = info
 

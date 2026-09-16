@@ -316,11 +316,12 @@ async def get_thread_history(
         rebuilt: list[dict] = []
         current_run = None
         assistant_content: list[str] = []
+        assistant_artifacts: list[str] = []
         assistant_created_at = None
 
         def flush_assistant() -> None:
             nonlocal assistant_created_at
-            if current_run is None or not assistant_content:
+            if current_run is None or (not assistant_content and not assistant_artifacts):
                 return
             rebuilt.append({
                 "id": f"{current_run[0]}-ai",
@@ -328,6 +329,7 @@ async def get_thread_history(
                 "role": "assistant",
                 "content": "".join(assistant_content),
                 "tool_calls": [],
+                "artifacts": list(dict.fromkeys(assistant_artifacts)),
                 "run_id": current_run[0],
                 "request_id": current_run[1],
                 "created_at": (
@@ -339,6 +341,7 @@ async def get_thread_history(
                 ),
             })
             assistant_content.clear()
+            assistant_artifacts.clear()
             assistant_created_at = None
 
         for run_id, request_id, input_payload, run_created_at, seq, event_type, payload, event_created_at in persisted:
@@ -374,6 +377,12 @@ async def get_thread_history(
                     "content": payload.get("message") or "上下文已压缩，前面的历史消息已保留。",
                     "created_at": event_created_at.isoformat() if event_created_at else None,
                 })
+            elif event_type == "artifact":
+                paths = payload.get("artifacts") if isinstance(payload, dict) else []
+                if isinstance(paths, list):
+                    assistant_artifacts.extend(
+                        str(path).strip() for path in paths if str(path).strip()
+                    )
         flush_assistant()
         if rebuilt:
             raw = rebuilt
@@ -381,14 +390,24 @@ async def get_thread_history(
         # 兼容没有事件账本的旧线程：仅在确实没有持久化事件时读取 checkpoint。
         agent = await _get_thread_agent(db, t)
         if agent is not None:
-            raw = await agent.get_history(current_user.uid, thread_id)
+            try:
+                raw = await agent.get_history(current_user.uid, thread_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Failed to read checkpoint history for thread %s: %s", thread_id, exc)
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": "HISTORY_UNAVAILABLE",
+                        "message": "历史消息暂时无法读取，请稍后重试。",
+                    },
+                ) from exc
 
     messages = []
     for m in raw:
         msg_type = m.get("type", "")
         if msg_type not in ("human", "ai", "system"):
             continue
-        if msg_type == "ai" and not (m.get("content") or "").strip():
+        if msg_type == "ai" and not (m.get("content") or "").strip() and not m.get("artifacts"):
             continue
         entry = {
             "id": m.get("id") or str(uuid.uuid4()),
@@ -396,6 +415,7 @@ async def get_thread_history(
             "role": "user" if msg_type == "human" else "system" if msg_type == "system" else "assistant",
             "content": _display_message_content(m.get("content")),
             "tool_calls": m.get("tool_calls") or [],
+            "artifacts": m.get("artifacts") or [],
             "created_at": (
                 m.get("created_at")
                 if isinstance(m.get("created_at"), str)

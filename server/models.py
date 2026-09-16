@@ -854,10 +854,11 @@ class AgentMemory(Base):
     """Agent 长期记忆元数据；读写行为由 PgMemoryStore 负责。"""
 
     __tablename__ = "agent_memories"
-    __table_args__ = (Index("ix_agent_memories_uid", "uid"),)
+    __table_args__ = (Index("ix_agent_memories_uid_project", "uid", "project_id"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     uid = Column(String(64), nullable=False)
+    project_id = Column(String(64), nullable=True)
     thread_id = Column(String(64), nullable=True)
     run_id = Column(String(64), nullable=True)
     content = Column(Text, nullable=False)

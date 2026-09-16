@@ -118,6 +118,39 @@ def test_temporary_workdir_normalizes_symlinked_host_root(tmp_path):
     assert (canonical / "written.txt").read_text(encoding="utf-8") == "ok"
 
 
+def test_temporary_workdir_accepts_relative_and_absolute_virtual_paths(tmp_path):
+    from server.workspace.temp_workdir import TemporaryWorkdir
+
+    workdir = TemporaryWorkdir("tmp/test", tmp_path)
+
+    relative = workdir.write_file("outputs/relative.py", b"relative")
+    absolute = workdir.write_file("/outputs/absolute.py", b"absolute")
+
+    assert relative["path"] == "/outputs/relative.py"
+    assert absolute["path"] == "/outputs/absolute.py"
+    assert (tmp_path / "outputs/relative.py").read_bytes() == b"relative"
+    assert (tmp_path / "outputs/absolute.py").read_bytes() == b"absolute"
+
+
+def test_temporary_workdir_rejects_traversal_for_relative_paths(tmp_path):
+    from server.workspace.temp_workdir import TemporaryWorkdir
+
+    workdir = TemporaryWorkdir("tmp/test", tmp_path)
+    with pytest.raises(ValueError, match="invalid temporary Workdir path"):
+        workdir.write_file("outputs/../outside.py", b"blocked")
+
+
+def test_persistent_workdir_accepts_relative_and_absolute_virtual_paths():
+    from server.workspace.workdir import Workdir
+
+    workdir = Workdir("projects/demo", object())
+
+    assert workdir.resolve_path("outputs/result.py") == "/projects/demo/outputs/result.py"
+    assert workdir.resolve_path("/outputs/result.py") == "/projects/demo/outputs/result.py"
+    with pytest.raises(ValueError, match="invalid Workdir scope path"):
+        workdir.resolve_path("outputs/../outside.py")
+
+
 @pytest.mark.asyncio
 async def test_unprepared_graph_requires_runtime_context():
     from datadeck.agents.buildin.chatbot.graph import ChatbotAgent

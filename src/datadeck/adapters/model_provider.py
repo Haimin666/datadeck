@@ -25,6 +25,8 @@ class EnvModelProvider(ModelProvider):
             api_key=os.getenv("DATADECK_API_KEY", ""),
             proxy_url=os.getenv("DATADECK_MODEL_HTTP_PROXY", ""),
             temperature=float(os.getenv("DATADECK_MODEL_TEMPERATURE", "0.0") or 0.0),
+            context_window=int(os.getenv("DATADECK_MODEL_CONTEXT_WINDOW", "131072")),
+            max_output_tokens=int(os.getenv("DATADECK_MODEL_MAX_OUTPUT_TOKENS", "32768")),
         )
 
     def get_model_info(self, spec: str) -> ChatModelSpec | None:

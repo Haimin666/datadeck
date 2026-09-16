@@ -16,7 +16,9 @@ from pathlib import PurePath
 
 from server.models import ThreadAttachment
 
-# 存储根：项目下 uploads/threads/<thread_id>/<file>
+MAX_RUNTIME_ARTIFACT_BYTES = 32 * 1024 * 1024
+
+# 存储根：项目下 uploads/threads/<thread_id>/<file>；运行产物使用 outputs/<request_id>/
 STORAGE_ROOT = os.path.realpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "threads"))
 
@@ -172,3 +174,69 @@ def read_artifact(thread_id: str, path: str, download: bool) -> tuple[bytes, str
 
     media = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
     return data, file_name, (media if download else media)
+
+
+def _runtime_artifact_files(workdir_root: str):
+    """枚举工作目录内的普通文件，outputs 目录只作为路径前缀而非扫描边界。"""
+    root = os.path.realpath(workdir_root)
+    if not os.path.isdir(root) or os.path.islink(root):
+        return
+    for base, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = [
+            name for name in dirs
+            if name != ".git" and not os.path.islink(os.path.join(base, name))
+        ]
+        for name in files:
+            path = os.path.join(base, name)
+            if os.path.islink(path):
+                continue
+            try:
+                stat = os.stat(path, follow_symlinks=False)
+            except OSError:
+                continue
+            relative = os.path.relpath(path, root).replace(os.sep, "/")
+            if relative.startswith("outputs/"):
+                relative = relative[len("outputs/"):]
+            yield path, relative, stat
+
+
+def capture_runtime_artifacts_snapshot(workdir_root: str) -> dict[str, tuple[int, int]]:
+    """记录一次消息开始前工作目录文件状态，用于识别本次新增或修改的文件。"""
+    if not os.path.isdir(os.path.realpath(workdir_root)):
+        return {}
+    snapshot: dict[str, tuple[int, int]] = {}
+    for _path, relative, stat in _runtime_artifact_files(workdir_root):
+        snapshot[relative] = (stat.st_size, stat.st_mtime_ns)
+    return snapshot
+
+
+def collect_runtime_artifacts(
+    thread_id: str,
+    workdir_root: str,
+    before: dict[str, tuple[int, int]] | None = None,
+    request_id: str = "message",
+) -> list[str]:
+    """收集当前消息产生的文件，并按消息请求 ID 复制到线程制品目录。"""
+    root = os.path.realpath(workdir_root)
+    if not os.path.isdir(root) or os.path.islink(root):
+        return []
+    before = before or {}
+    request_segment = _safe_segment(request_id, "请求标识")
+    collected: list[str] = []
+    for source, relative, stat in _runtime_artifact_files(workdir_root):
+        signature = (stat.st_size, stat.st_mtime_ns)
+        if before.get(relative) == signature or stat.st_size > MAX_RUNTIME_ARTIFACT_BYTES:
+            continue
+        virtual_path = f"/outputs/{request_segment}/{relative}"
+        target = _safe_join(thread_id, virtual_path.lstrip("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        temporary = f"{target}.tmp-{uuid.uuid4().hex}"
+        try:
+            shutil.copyfile(source, temporary)
+            os.replace(temporary, target)
+        except OSError:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+            continue
+        collected.append(virtual_path)
+    return collected

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import MISSING, dataclass, field, fields
-from typing import Any, get_origin
+from typing import Any, get_origin, get_type_hints
+
+from pydantic import TypeAdapter, ValidationError
 
 # ── 摘要/预算默认常量（自 Yuxi 原样迁移）─────────────────────────
 DEFAULT_SUMMARY_THRESHOLD_K = 100            # 100K tokens 触发摘要
@@ -59,10 +61,15 @@ class BaseContext:
     """
 
     def update(self, data: dict):
-        """仅更新已声明的字段（忽略未知键）。"""
+        """校验后更新已声明字段；未知键仍由宿主运行字段单独注入。"""
         declared_fields = {item.name for item in fields(self)}
         for key, value in data.items():
             if key in declared_fields:
+                try:
+                    field_type = get_type_hints(type(self)).get(key, Any)
+                    value = TypeAdapter(field_type).validate_python(value, strict=True)
+                except (TypeError, ValueError, ValidationError) as exc:
+                    raise ValueError(f"Agent Context 字段 {key} 配置无效: {exc}") from exc
                 setattr(self, key, value)
 
     thread_id: str = field(
@@ -107,6 +114,10 @@ class BaseContext:
         default="",
         metadata={"name": "模型", "description": "使用的聊天模型 spec (provider:model_id)", "type": "string", "kind": "llm"},
     )
+
+    model_context_window: int | None = field(default=None, metadata={"hide": True})
+    model_max_output_tokens: int | None = field(default=None, metadata={"hide": True})
+    context_budget: dict[str, int] = field(default_factory=dict, metadata={"hide": True})
 
     system_prompt: str = field(
         default="",

@@ -31,7 +31,10 @@ from server.utils.datetime_utils import utc_now_naive
 from server.utils.sse_utils import format_sse, format_heartbeat
 
 # updates 里非 messages 的结构化 state 字段（翻译为 agent_state）
-_AGENT_STATE_KEYS = ("todos", "artifacts", "token_usage", "sql_validation", "data_workflow")
+_AGENT_STATE_KEYS = (
+    "todos", "artifacts", "token_usage", "sql_validation", "data_workflow",
+    "context_compression", "token_budget",
+)
 
 # ── 进程内实时事件总线 ──────────────────────────────────────────
 # append_event 落库后立即 publish，poll_run_events 优先消费内存事件、
@@ -307,6 +310,9 @@ async def consume_graph_stream(
                             }, thread_id)
                     state = _extract_agent_state(upd)
                     if state:
+                        compression = state.get("context_compression")
+                        if isinstance(compression, dict) and compression.get("status") == "failed":
+                            await append_event(run_id, "context_compression_failed", compression, thread_id)
                         await append_event(run_id, "custom", {
                             "name": "yuxi.agent_state",
                             "chunk": {"status": "agent_state", "agent_state": state,

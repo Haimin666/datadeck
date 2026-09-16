@@ -436,7 +436,7 @@ class TestRunsApi:
         )
         assert unknown_agent.status_code == 404
 
-    def test_second_run_is_queued_and_request_id_routes_work(self, app_client):
+    def test_second_run_is_rejected_while_first_run_is_active(self, app_client):
         headers = _login(app_client)
         thread = app_client.post(
             "/api/chat/thread",
@@ -458,7 +458,7 @@ class TestRunsApi:
             )
 
         request_id = str(uuid.uuid4())
-        queued = app_client.post(
+        blocked = app_client.post(
             "/api/agent/runs",
             json={
                 "query": "later",
@@ -469,24 +469,8 @@ class TestRunsApi:
             },
             headers=headers,
         )
-        assert queued.status_code == 200, queued.text
-        assert queued.json()["status"] == "queued"
-        assert queued.json()["request_id"] == request_id
-
-        listed = app_client.get(
-            f"/api/agent/thread/{thread['id']}/requests?agent_slug=default-chatbot",
-            headers=headers,
-        ).json()["requests"]
-        assert any(item["request_id"] == request_id for item in listed)
-
-        steered = app_client.post(
-            f"/api/agent/requests/{request_id}/steer", headers=headers
-        )
-        assert steered.status_code == 200, steered.text
-        cancelled = app_client.post(
-            f"/api/agent/requests/{request_id}/cancel", headers=headers
-        )
-        assert cancelled.status_code == 200, cancelled.text
+        assert blocked.status_code == 409, blocked.text
+        assert "上一条消息仍在处理中" in blocked.json()["detail"]
 
 
 class TestAgentApi:

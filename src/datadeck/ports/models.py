@@ -25,6 +25,8 @@ class ChatModelSpec:
     api_key: str = ""
     proxy_url: str = ""
     temperature: float = 0.0
+    context_window: int | None = None
+    max_output_tokens: int | None = None
 
 
 @runtime_checkable

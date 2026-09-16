@@ -41,6 +41,9 @@ export function useAgentRequestQueue({
       if (ts.onGoingConv?.msgChunks) {
         delete ts.onGoingConv.msgChunks[requestId]
       }
+      ts.queuedMessageProjections = (ts.queuedMessageProjections || []).filter(
+        (message) => message?.extra_metadata?.request_id !== requestId
+      )
       return true
     } catch (error) {
       if (error?.name !== 'AbortError') {

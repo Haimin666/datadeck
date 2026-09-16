@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from langchain.agents.middleware.summarization import SummarizationMiddleware
+from langchain.agents.middleware.types import AgentState
 from langchain_core.messages.utils import count_tokens_approximately
 
 from datadeck.agents.context import (
@@ -14,6 +15,32 @@ from datadeck.agents.context import (
     DEFAULT_SUMMARY_KEEP_MESSAGES,
     DEFAULT_SUMMARY_THRESHOLD_K,
 )
+
+
+class ResilientSummarizationMiddleware(SummarizationMiddleware):
+    """摘要失败时放行原消息，由 TokenBudgetMiddleware 执行安全裁剪。"""
+
+    @staticmethod
+    def _failure(exc: Exception) -> dict:
+        return {
+            "context_compression": {
+                "status": "failed",
+                "error_type": type(exc).__name__,
+                "message": "上下文摘要失败，已回退到安全消息裁剪。",
+            }
+        }
+
+    def before_model(self, state: AgentState, runtime):  # noqa: ANN001
+        try:
+            return super().before_model(state, runtime)
+        except Exception as exc:  # noqa: BLE001
+            return self._failure(exc)
+
+    async def abefore_model(self, state: AgentState, runtime):  # noqa: ANN001
+        try:
+            return await super().abefore_model(state, runtime)
+        except Exception as exc:  # noqa: BLE001
+            return self._failure(exc)
 
 
 def create_summary_middleware(
@@ -30,7 +57,7 @@ def create_summary_middleware(
     trigger_k = trigger_k if trigger_k is not None else DEFAULT_SUMMARY_THRESHOLD_K
     keep = keep_messages if keep_messages is not None else DEFAULT_SUMMARY_KEEP_MESSAGES
     prompt = summary_prompt or DEFAULT_DATADECK_SUMMARY_PROMPT
-    return SummarizationMiddleware(
+    return ResilientSummarizationMiddleware(
         model=model,
         trigger=("tokens", int(trigger_k) * 1024),
         keep=("messages", int(keep)),

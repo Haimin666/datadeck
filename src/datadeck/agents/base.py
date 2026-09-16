@@ -19,6 +19,10 @@ from datadeck.agents.policy import AgentPolicy, CHATBOT_POLICY
 from datadeck import logger
 
 
+class HistoryReadError(RuntimeError):
+    """Checkpoint 历史读取失败，不能被伪装成空历史。"""
+
+
 def _recursion_limit_from_context(context: BaseContext, default: int) -> int:
     value = getattr(context, "max_execution_steps", default)
     return int(value) if isinstance(value, int) and value > 0 else default
@@ -118,7 +122,7 @@ class BaseAgent:
             app = await self.get_graph(metadata_only=True)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"get_history: build graph failed: {exc}")
-            return []
+            raise HistoryReadError("构建历史读取运行时失败") from exc
         if not await self.check_checkpointer(app):
             return []
         config = {"configurable": {"thread_id": thread_id, "uid": uid}}
@@ -126,7 +130,7 @@ class BaseAgent:
             state = await app.aget_state(config)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"aget_state failed: {exc}")
-            return []
+            raise HistoryReadError("读取 Agent Checkpoint 失败") from exc
         result: list[dict] = []
         if state:
             for msg in state.values.get("messages", []):

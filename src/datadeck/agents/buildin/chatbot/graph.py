@@ -36,6 +36,9 @@ from datadeck.agents.middlewares.sql_selfcheck import create_sql_selfcheck_middl
 from datadeck.agents.middlewares.summary import create_summary_middleware
 from datadeck.agents.middlewares.token_budget import TokenBudgetMiddleware
 from datadeck.agents.middlewares.tool_timeout import ToolTimeoutMiddleware
+from datadeck.agents.middlewares.tool_failure_guard import ToolFailureGuardMiddleware
+from datadeck.agents.middlewares.trust_boundary import ToolResultTrustBoundaryMiddleware
+from datadeck.agents.middlewares.context_budget import resolve_context_budget
 from datadeck.agents.models import default_model_spec, load_chat_model
 from datadeck.agents.tool_approval import create_tool_approval_middleware, normalize_tool_approval_mode
 from datadeck.agents.toolkits.service import resolve_configured_runtime_tools
@@ -45,9 +48,14 @@ from datadeck.ports.memory import MemoryStore
 
 async def _build_middlewares(context: BaseContext, *, model, memory_store: MemoryStore | None = None):
     """构建 middleware 链（datadeck 版）。"""
+    budget = resolve_context_budget(
+        getattr(context, "model_context_window", None),
+        getattr(context, "model_max_output_tokens", None),
+    )
+    context.context_budget = budget.to_dict()
     summary_middleware = create_summary_middleware(
         model,
-        trigger_k=getattr(context, "summary_threshold", None),
+        trigger_k=budget.summary_trigger // 1024,
         keep_messages=getattr(context, "summary_keep_messages", None),
         summary_prompt=getattr(context, "summary_prompt", None),
     )
@@ -69,12 +77,17 @@ async def _build_middlewares(context: BaseContext, *, model, memory_store: Memor
     # token 统计和工具超时保护，最终表现为长对话变慢或永久卡住。
     middlewares.extend([
         summary_middleware,
-        TokenBudgetMiddleware(),
+        TokenBudgetMiddleware(
+            budget_tokens=budget.soft_budget,
+            hard_limit_tokens=budget.hard_limit,
+        ),
         TodoListMiddleware(system_prompt=TODO_MID_PROMPT),
         PatchToolCallsMiddleware(),
         ModelRetryMiddleware(max_retries=int(getattr(context, "model_retry_times", 2))),
         TokenUsageMiddleware(),
+        ToolFailureGuardMiddleware(),
         ToolTimeoutMiddleware(getattr(context, "tool_timeout_seconds", 120)),
+        ToolResultTrustBoundaryMiddleware(),
     ])
     approval_middleware = create_tool_approval_middleware(
         normalize_tool_approval_mode(getattr(context, "tool_approval_mode", "default")),
@@ -152,6 +165,12 @@ class ChatbotAgent(BaseAgent):
         if not model_spec:
             model_spec = default_model_spec(self._model_provider)
             context.model = model_spec
+        model_info = (
+            self._model_provider.get_model_info(model_spec)
+            if hasattr(self._model_provider, "get_model_info") else None
+        )
+        context.model_context_window = getattr(model_info, "context_window", None)
+        context.model_max_output_tokens = getattr(model_info, "max_output_tokens", None)
         model = load_chat_model(model_spec, provider=self._model_provider)
 
         middlewares = await _build_middlewares(
@@ -174,6 +193,12 @@ class ChatbotAgent(BaseAgent):
                 if getattr(tool, "name", "") == "rag_search" else tool
                 for tool in tools
             ]
+        for tool in tools:
+            # handle_tool_error 不覆盖 Pydantic 参数校验；显式设置后，校验错误
+            # 会作为 ToolMessage 返回给模型，而不是直接击穿工具节点。
+            tool.handle_validation_error = lambda error: (
+                f"工具参数校验失败：{error}。请根据工具 schema 补全并修正参数。"
+            )
         runtime_snapshot = getattr(context, "_runtime_snapshot", None)
         selected_mcps = runtime_snapshot.selected("mcps") if runtime_snapshot else ()
         snapshot_identity = {}

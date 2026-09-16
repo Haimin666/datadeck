@@ -24,9 +24,9 @@ MEMORY_SYSTEM_PROMPT = """## 用户级 Memory
 - 只有当前用户明确要求纠正既有记忆，且你掌握唯一精确旧文本时，才传 `replaces`。
 - 不主动推断并保存用户画像，不保存凭据、临时信息、推测或仅属于当前 Project 的私密事实。
 
-<memory_data>
+<untrusted_memory>
 {memory_content}
-</memory_data>"""
+</untrusted_memory>"""
 
 
 async def create_memory_middleware(context, *, store: MemoryStore | None = None):
@@ -35,7 +35,7 @@ async def create_memory_middleware(context, *, store: MemoryStore | None = None)
         return None
     uid = str(getattr(context, "uid", "") or "")
     try:
-        memory_content = await store.load_prompt(uid)
+        memory_content = await store.load_prompt(uid, getattr(context, "project_id", None))
     except Exception:  # noqa: BLE001
         return None
     if memory_content is None:
@@ -71,7 +71,8 @@ def _remember_tool(store: MemoryStore) -> StructuredTool:
             return await store.remember(
                 uid=getattr(context, "uid", None), thread_id=getattr(context, "thread_id", None),
                 run_id=getattr(context, "run_id", None), request_id=getattr(context, "request_id", None),
-                worker_id=getattr(context, "worker_id", None), content=content, replaces=replaces)
+                worker_id=getattr(context, "worker_id", None),
+                project_id=getattr(context, "project_id", None), content=content, replaces=replaces)
         except ValueError as exc:
             return {"status": "error", "error": str(exc)}
     return _async_tool(name="remember_memory", coroutine=aremember_memory,
@@ -81,11 +82,12 @@ def _remember_tool(store: MemoryStore) -> StructuredTool:
 def _search_tool(store: MemoryStore) -> StructuredTool:
     async def asearch(query: str, runtime: ToolRuntime, limit: int = 5) -> dict:
         try:
-            return await store.search(uid=getattr(runtime.context, "uid", None), query=query, limit=limit)
+            return await store.search(uid=getattr(runtime.context, "uid", None), query=query, limit=limit,
+                                      project_id=getattr(runtime.context, "project_id", None))
         except ValueError as exc:
             return {"status": "error", "error": str(exc)}
-    return _async_tool(name="search_thread_messages", coroutine=asearch,
-                       description="搜索当前用户可见的历史消息，返回有界摘要。")
+    return _async_tool(name="search_user_memories", coroutine=asearch,
+                       description="搜索当前用户的长期记忆，返回有界摘要；不是线程历史消息。")
 
 
 def _read_tool(store: MemoryStore) -> StructuredTool:
@@ -93,11 +95,12 @@ def _read_tool(store: MemoryStore) -> StructuredTool:
                     limit: int = 20, include_tools: bool = False) -> dict:
         try:
             return await store.read(uid=getattr(runtime.context, "uid", None), thread_id=thread_id,
-                                    message_id=message_id, limit=limit, include_tools=include_tools)
+                                    message_id=message_id, limit=limit, include_tools=include_tools,
+                                    project_id=getattr(runtime.context, "project_id", None))
         except ValueError as exc:
             return {"status": "error", "error": str(exc)}
-    return _async_tool(name="read_thread_messages", coroutine=aread,
-                       description="读取当前用户一个线程的有界历史。")
+    return _async_tool(name="read_user_memories", coroutine=aread,
+                       description="读取当前用户保存的长期记忆；不是线程历史消息。")
 
 
 def _async_tool(*, name: str, coroutine, description: str) -> StructuredTool:

@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, ModelRequest, ModelResponse
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 DEFAULT_BUDGET_TOKENS = 60_000
@@ -84,7 +84,7 @@ class TokenBudgetMiddleware(AgentMiddleware[TokenBudgetState]):
 
     def _trim_middle(self, messages: list[BaseMessage], target: int,
                      keep_tail: int = 6) -> tuple[list[BaseMessage], int]:
-        """保开头 system 与结尾 keep_tail 条，中段从老到新裁剪直到达标。"""
+        """按完整工具调用组裁剪，不能留下孤立 tool_call/tool_result。"""
         head_end = 0
         for i, m in enumerate(messages):
             if isinstance(m, SystemMessage):
@@ -94,10 +94,20 @@ class TokenBudgetMiddleware(AgentMiddleware[TokenBudgetState]):
         tail = messages[tail_start:]
         middle = messages[head_end:tail_start]
 
+        current_indices = set(range(head_end, tail_start))
         removed = 0
         while middle and self.token_counter(head + middle + tail) > target:
-            middle.pop(0)  # 最老的先裁
-            removed += 1
+            groups = self._message_groups(messages)
+            candidate = next(
+                (group for group in groups
+                 if group and group.issubset(current_indices)),
+                None,
+            )
+            if not candidate:
+                break
+            current_indices -= candidate
+            middle = [messages[i] for i in sorted(current_indices)]
+            removed += len(candidate)
         return head + middle + tail, removed
 
     def _trim_hard(self, messages: list[BaseMessage], keep_tail: int = 4) -> tuple[list[BaseMessage], int]:
@@ -105,10 +115,45 @@ class TokenBudgetMiddleware(AgentMiddleware[TokenBudgetState]):
         for i, m in enumerate(messages):
             if isinstance(m, SystemMessage):
                 head_end = i + 1
-        head = messages[:head_end]
-        tail = messages[-keep_tail:]
-        removed = len(messages) - len(head) - len(tail)
-        return head + tail, max(removed, 0)
+        keep = set(range(head_end)) | set(range(max(head_end, len(messages) - keep_tail), len(messages)))
+        for group in self._message_groups(messages):
+            if keep.intersection(group):
+                keep.update(group)
+        trimmed = [message for i, message in enumerate(messages) if i in keep]
+        return trimmed, max(len(messages) - len(trimmed), 0)
+
+    @staticmethod
+    def _message_groups(messages: list[BaseMessage]) -> list[set[int]]:
+        """返回按 tool_call_id 连接的消息组，普通消息各自成组。"""
+        parent = list(range(len(messages)))
+
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(left: int, right: int) -> None:
+            left_root, right_root = find(left), find(right)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+        tool_calls: dict[str, int] = {}
+        for index, message in enumerate(messages):
+            if isinstance(message, AIMessage):
+                for call in message.tool_calls or []:
+                    call_id = str(call.get("id", "")).strip()
+                    if call_id:
+                        tool_calls[call_id] = index
+        for index, message in enumerate(messages):
+            if isinstance(message, ToolMessage):
+                call_id = str(message.tool_call_id or "").strip()
+                if call_id in tool_calls:
+                    union(index, tool_calls[call_id])
+        groups: dict[int, set[int]] = {}
+        for index in range(len(messages)):
+            groups.setdefault(find(index), set()).add(index)
+        return list(groups.values())
 
     # ── state 记录 ───────────────────────────────────────
 
@@ -118,7 +163,10 @@ class TokenBudgetMiddleware(AgentMiddleware[TokenBudgetState]):
 
         if payload.get("action") == "none":
             return response
-        update: dict[str, Any] = {"token_budget_trimmed": payload["trimmed_messages"]}
+        update: dict[str, Any] = {
+            "token_budget_trimmed": payload["trimmed_messages"],
+            "token_budget": dict(payload),
+        }
         if isinstance(response, ExtendedModelResponse):
             existing = dict(response.command.update) if response.command is not None else {}
             existing.update(update)

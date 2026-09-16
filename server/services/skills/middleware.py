@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-import json
 from pathlib import PurePosixPath
 from typing import Annotated, Any, NotRequired
 
@@ -63,54 +62,6 @@ class SkillsMiddleware(AgentMiddleware):
             f"{VIRTUAL_SKILLS_PATH}/",
             f"{VIRTUAL_PERSONAL_SKILLS_PATH}/",
         ]
-
-    @staticmethod
-    def _tool_failure_key(request: ToolCallRequest) -> str:
-        """按工具名和参数识别重复失败，不把不同参数误判为死循环。"""
-        tool_call = request.tool_call or {}
-        return json.dumps(
-            [tool_call.get("name", ""), tool_call.get("args", {})],
-            ensure_ascii=False,
-            sort_keys=True,
-            default=str,
-        )
-
-    def _record_tool_failure(self, request: ToolCallRequest, message: str) -> None:
-        """同一 Run 同一调用连续失败两次后终止，避免模型无限重试。"""
-        context = request.runtime.context
-        failures = getattr(context, "_tool_failure_counts", None)
-        if not isinstance(failures, dict):
-            failures = {}
-            setattr(context, "_tool_failure_counts", failures)
-        key = self._tool_failure_key(request)
-        count = int(failures.get(key, 0)) + 1
-        failures[key] = count
-        # 请求级状态有界，防止模型生成大量不同错误参数导致上下文膨胀。
-        if len(failures) > 64:
-            failures.pop(next(iter(failures)))
-        if count >= 2:
-            name = request.tool_call.get("name", "未知工具")
-            raise RuntimeError(
-                f"工具 {name} 对相同参数已连续失败 {count} 次，已终止本次运行。"
-                f"最后错误：{message[:400]}"
-            )
-
-    def _clear_tool_failure(self, request: ToolCallRequest) -> None:
-        failures = getattr(request.runtime.context, "_tool_failure_counts", None)
-        if isinstance(failures, dict):
-            failures.pop(self._tool_failure_key(request), None)
-
-    @staticmethod
-    def _result_failure_message(result: Any) -> str:
-        """识别工具节点已转换成结果的错误，覆盖 handle_tool_error 场景。"""
-        if not isinstance(result, ToolMessage):
-            return ""
-        content = result.content
-        text = content if isinstance(content, str) else str(content)
-        status = getattr(result, "status", None)
-        if status == "error" or text.startswith(("工具执行失败", "无法读取该 Skill", "无法读取该文件")):
-            return text
-        return ""
 
     async def awrap_model_call(
         self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]
@@ -287,19 +238,13 @@ class SkillsMiddleware(AgentMiddleware):
             # 工具参数错误、路径错误、MCP 连接错误都应回传给模型自行纠正；
             # 只有取消信号需要继续向上抛出，不能让单个工具击穿整个 Run。
             message = f"{type(exc).__name__}: {str(exc)[:500]}"
-            self._record_tool_failure(request, message)
             logger.warning("SkillsMiddleware: tool call failed, returning recoverable result: %s: %s",
                            request.tool_call.get("name"), exc)
             result = ToolMessage(
                 content=f"工具执行失败（{message}）",
                 tool_call_id=request.tool_call.get("id", ""),
+                status="error",
             )
-        else:
-            failure_message = self._result_failure_message(result)
-            if failure_message:
-                self._record_tool_failure(request, failure_message)
-            else:
-                self._clear_tool_failure(request)
         return self._process_tool_call_result(result, request)
 
     def wrap_tool_call(
@@ -313,19 +258,13 @@ class SkillsMiddleware(AgentMiddleware):
             result = handler(request)
         except Exception as exc:  # noqa: BLE001
             message = f"{type(exc).__name__}: {str(exc)[:500]}"
-            self._record_tool_failure(request, message)
             logger.warning("SkillsMiddleware: sync tool call failed, returning recoverable result: %s: %s",
                            request.tool_call.get("name"), exc)
             result = ToolMessage(
                 content=f"工具执行失败（{message}）",
                 tool_call_id=request.tool_call.get("id", ""),
+                status="error",
             )
-        else:
-            failure_message = self._result_failure_message(result)
-            if failure_message:
-                self._record_tool_failure(request, failure_message)
-            else:
-                self._clear_tool_failure(request)
         return self._process_tool_call_result(result, request)
 
     def _bind_active_mcp_tool(self, request: ToolCallRequest) -> ToolCallRequest:

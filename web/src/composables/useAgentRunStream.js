@@ -300,6 +300,7 @@ export function useAgentRunStream({
       ts.traceEvents = []
       ts.runtimeSnapshot = null
       ts.runtimeDiagnostics = []
+      ts.runtimeArtifacts = []
     }
     ts.lastRetryableJobTry = null
     ts.isStreaming = true
@@ -340,13 +341,24 @@ export function useAgentRunStream({
             thread_id: threadId
           }, threadId)
         } else if (event === 'runtime_diagnostic') {
-          handleStreamChunk({
+            handleStreamChunk({
             status: 'runtime_diagnostic',
             diagnostic: payload,
             ...payload,
             run_id: runId,
             thread_id: threadId
-          }, threadId)
+            }, threadId)
+        } else if (event === 'artifact') {
+          const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts : []
+          if (artifacts.length) {
+            ts.runtimeArtifacts = [
+              ...new Set([...(ts.runtimeArtifacts || []), ...artifacts.filter(Boolean)])
+            ]
+            ts.agentState = {
+              ...(ts.agentState || {}),
+              artifacts: ts.runtimeArtifacts
+            }
+          }
         }
         if (event === 'metadata') {
           ts.activeRunSteerable = isSteerableMainChatRun({
@@ -355,7 +367,14 @@ export function useAgentRunStream({
             source: payload.source
           })
         }
-        const terminalStatus = event === 'end' ? payload.status : data.status
+        // end 事件本身就是终态；不同后端版本可能把状态放在 payload、run 或外层。
+        // 如果没有状态，按 completed 处理，确保侧栏和输入区不会永久停留在 loading。
+        const rawTerminalStatus = event === 'end'
+          ? payload.status || payload.run?.status || data.status || data.run?.status
+          : data.status || payload.status
+        const terminalStatus = event === 'end'
+          ? ({ success: 'completed', succeeded: 'completed', done: 'completed' }[rawTerminalStatus] || rawTerminalStatus || 'completed')
+          : rawTerminalStatus
         const isRetryableError =
           event === 'error' && (payload?.retryable === true || payload?.chunk?.retryable === true)
         if (isRetryableError) {

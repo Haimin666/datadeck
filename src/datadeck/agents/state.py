@@ -37,6 +37,8 @@ class BaseState(AgentState):
     sql_validation: dict | None   # SqlSelfCheckMiddleware：最终验证状态
     data_workflow: Annotated[dict, merge_data_workflow]  # DataWorkflowMiddleware：数据工具前置条件
     activated_skills: Annotated[list[str], merge_string_list]
+    context_compression: dict | None
+    token_budget: dict | None
 
 
 class AgentStatePayload(TypedDict):
@@ -47,3 +49,5 @@ class AgentStatePayload(TypedDict):
     token_usage: dict | None
     sql_validation: dict | None
     data_workflow: dict
+    context_compression: dict | None
+    token_budget: dict | None

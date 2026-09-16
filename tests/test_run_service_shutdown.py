@@ -15,6 +15,27 @@ def test_runtime_resource_mentions_are_parsed():
     ) == (["业务 规范"], ["dba"])
 
 
+def test_timeout_progress_report_contains_todos_and_recent_tools():
+    report = run_service._format_timeout_progress(
+        [
+            ("custom", {"agent_state": {"todos": [
+                {"content": "读取表结构", "status": "completed"},
+                {"content": "生成同步 SQL", "status": "in_progress"},
+            ]}}),
+            ("messages", {"chunk": {"stream_event": {
+                "type": "tool_call", "name": "omd_get_table_schema",
+            }}}),
+        ],
+        600,
+        "Agent 运行超时：模型或工具在限定时间内没有返回",
+    )
+
+    assert "读取表结构" in report
+    assert "生成同步 SQL" in report
+    assert "omd_get_table_schema" in report
+    assert "600 秒上限" in report
+
+
 @pytest.mark.asyncio
 async def test_pending_run_is_claimed_once_across_dispatchers(monkeypatch):
     class Result:

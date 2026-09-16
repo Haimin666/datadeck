@@ -8,6 +8,7 @@ from langchain_core.tools import StructuredTool
 from server.services.agent_runtime_tools import build_knowledge_search_tool
 from server.services.agent_runtime_tools import build_agent_runtime_tools
 from server.services.agent_runtime_contract import RuntimeResource
+from server.workspace.temp_workdir import TemporaryWorkdir
 
 
 class _DbResult:
@@ -162,3 +163,26 @@ async def test_explicit_parent_subagent_mount_bypasses_duplicate_role_assignment
     assert result["status"] == "started"
     assert result["run_id"] == "child-run"
     assert dispatched == ["child-run"]
+
+
+@pytest.mark.asyncio
+async def test_execute_supports_shell_redirection_in_authorized_workdir(tmp_path):
+    context = SimpleNamespace(
+        runtime_permissions=("workspace",),
+        task_kind="analysis",
+        tools=["package:platform"],
+        workdir_path="tmp/test",
+        workdir=TemporaryWorkdir("tmp/test", tmp_path),
+    )
+    tool = next(
+        item for item in build_agent_runtime_tools(context, SimpleNamespace(uid="u1"))
+        if item.name == "execute"
+    )
+
+    result = await tool.coroutine(
+        command="mkdir -p outputs && printf 'generated' > outputs/result.txt && cat outputs/result.txt"
+    )
+
+    assert result["ok"] is True
+    assert result["output"] == "generated"
+    assert (tmp_path / "outputs/result.txt").read_text() == "generated"

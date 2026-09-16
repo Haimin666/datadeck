@@ -68,6 +68,28 @@ async def test_present_artifacts_copies_outputs_into_thread_storage(monkeypatch,
     assert (storage_root / "thread-1" / "outputs" / "result.json").read_text(encoding="utf-8") == '{"ok": true}'
 
 
+def test_compact_runtime_artifacts_are_message_isolated(monkeypatch, tmp_path):
+    from server.services import attachment_service
+
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    (workdir / "before.py").write_text("old", encoding="utf-8")
+    before = attachment_service.capture_runtime_artifacts_snapshot(str(workdir))
+    (workdir / "generated.py").write_text("print('generated')", encoding="utf-8")
+    (workdir / "outputs").mkdir()
+    (workdir / "outputs" / "result.json").write_text('{"ok": true}', encoding="utf-8")
+    storage = tmp_path / "threads"
+    monkeypatch.setattr(attachment_service, "STORAGE_ROOT", str(storage))
+
+    paths = attachment_service.collect_runtime_artifacts(
+        "thread-1", str(workdir), before, "request-7",
+    )
+
+    assert paths == ["/outputs/request-7/generated.py", "/outputs/request-7/result.json"]
+    assert (storage / "thread-1" / "outputs" / "request-7" / "generated.py").read_text(encoding="utf-8") == "print('generated')"
+    assert (storage / "thread-1" / "outputs" / "request-7" / "result.json").read_text(encoding="utf-8") == '{"ok": true}'
+
+
 @pytest.mark.asyncio
 async def test_skill_script_runs_only_from_mounted_skill(tmp_path):
     from server.workspace.temp_workdir import TemporaryWorkdir

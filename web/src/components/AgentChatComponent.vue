@@ -221,6 +221,7 @@
                     <span class="queued-request-content" :title="request.content || '排队请求'">
                       {{ request.content || '排队请求' }}
                     </span>
+                    <span class="queued-request-status">{{ queueRequestStatusLabel(request) }}</span>
                     <div class="queued-request-actions">
                       <span v-if="request.queue_policy === 'steer'" class="queued-request-position">
                         引导 · 下一条执行
@@ -265,14 +266,12 @@
 
                 <div
                   class="message-input-surface"
-                  :inert="currentToolApprovalVisible"
-                  :aria-hidden="currentToolApprovalVisible ? 'true' : undefined"
                 >
                   <AgentInputArea
                     ref="agentInputAreaRef"
                     v-model="userInput"
                     :is-loading="shouldShowStopButton"
-                    :disabled="!currentAgent || currentToolApprovalVisible"
+                    :disabled="!currentAgent"
                     :send-button-disabled="isSendButtonDisabled"
                     :mention="mentionConfig"
                     :thread-id="currentChatId"
@@ -967,6 +966,8 @@ const userStore = useUserStore()
 const canSelectProject = computed(() => userStore.canAccess('workspace'))
 const canConfigureApproval = computed(() => userStore.canAccess('extensions'))
 const canViewWorkspaceFiles = computed(() => userStore.canAccess('workspace'))
+// 简化 UI 的产物自动随消息交付；完整 UI 保持右侧文件栏行为。
+const uiMode = computed(() => (canViewWorkspaceFiles.value ? 'full' : 'compact'))
 const messageDebugEnabled = computed(() => infoStore.debugMode && userStore.isSuperAdmin)
 const {
   agents,
@@ -1762,7 +1763,10 @@ const currentArtifacts = computed(() => {
   return Array.isArray(artifacts) ? artifacts : []
 })
 const currentArtifactFiles = computed(() =>
-  currentArtifacts.value
+  [...new Set([
+    ...currentArtifacts.value,
+    ...(currentThreadState.value?.runtimeArtifacts || [])
+  ])]
     .map((path) => String(path || '').trim())
     .filter(Boolean)
     .map((path) => ({
@@ -1993,7 +1997,10 @@ const getThreadOngoingMessages = (threadId) => {
   const threadState = getThreadState(threadId)
   if (!threadState || !threadState.onGoingConv) return []
 
-  const msgs = Object.values(threadState.onGoingConv.msgChunks)
+  const projected = Array.isArray(threadState.queuedMessageProjections)
+    ? threadState.queuedMessageProjections
+    : []
+  const msgs = [...projected, ...Object.values(threadState.onGoingConv.msgChunks)]
     .map(MessageProcessor.mergeMessageChunk)
     .filter(Boolean)
   return msgs.length > 0
@@ -2289,13 +2296,21 @@ const conversations = computed(() => {
 })
 
 const conversationRows = computed(() => {
-  const rows = conversations.value.map((conv, index) => ({
-    type: 'conversation',
-    key: conv.status === 'streaming' ? 'ongoing-conversation' : `history-${index}`,
-    conv,
-    displayItems: getDisplayItems(conv),
-    artifacts: MessageProcessor.extractArtifactsFromConversation(conv)
-  }))
+  const rows = conversations.value.map((conv, index) => {
+    const artifacts = MessageProcessor.extractArtifactsFromConversation(conv)
+    // 简化版没有右侧文件栏，实时 artifact 事件需要在消息区域直接展示。
+    if (!canViewWorkspaceFiles.value && index === conversations.value.length - 1) {
+      const runtimeArtifacts = currentArtifactFiles.value.map((file) => file.path)
+      artifacts.push(...runtimeArtifacts.filter((path) => !artifacts.includes(path)))
+    }
+    return {
+      type: 'conversation',
+      key: conv.status === 'streaming' ? 'ongoing-conversation' : `history-${index}`,
+      conv,
+      displayItems: getDisplayItems(conv),
+      artifacts
+    }
+  })
 
   if (currentThreadConfigNotice.value) {
     const insertAfterCount = Math.max(
@@ -2320,7 +2335,17 @@ const isStreaming = computed(() => {
   const threadState = currentThreadState.value
   return threadState ? threadState.isStreaming : false
 })
-const currentQueuedRequests = computed(() => currentThreadState.value?.queuedRequests || [])
+const currentQueuedRequests = computed(() => {
+  const threadState = currentThreadState.value
+  const serverRequests = threadState?.queuedRequests || []
+  const localRequests = (threadState?.pendingMessageQueue || []).map((request) => ({
+    ...request,
+    source: 'local',
+    status: request.status || 'queued',
+    queue_policy: 'enqueue'
+  }))
+  return [...localRequests, ...serverRequests]
+})
 const hasPendingSteer = computed(() =>
   currentQueuedRequests.value.some(
     (request) => request?.queue_policy === 'steer' && request?.status === 'queued'
@@ -2331,6 +2356,12 @@ const currentQueueSnapshot = computed(
 )
 const queuedRequestCount = computed(() => currentQueuedRequests.value.length)
 const hasQueuedRequests = computed(() => queuedRequestCount.value > 0)
+const queueRequestStatusLabel = (request) => {
+  if (request?.status === 'failed') return '失败'
+  if (request?.status === 'cancelled') return '已取消'
+  if (request?.queue_policy === 'steer') return '下一条'
+  return '排队中'
+}
 const isWaitingForUserAction = computed(() =>
   isThreadWaitingForUserAction(currentThreadState.value)
 )
@@ -2390,6 +2421,16 @@ const agentPanelFilesystemPollingActive = computed(() =>
 const isProcessing = computed(
   () =>
     isStreaming.value || (hasQueuedRequests.value && currentQueueSnapshot.value.status !== 'paused')
+)
+watch(
+  [currentChatId, isProcessing],
+  ([threadId, processing]) => {
+    // 侧栏 loading 是客户端展示态；以当前线程真实运行态兜底清理，避免丢失 SSE 终态后残留转圈。
+    if (threadId && !processing) {
+      chatThreadsStore.setThreadStatus(threadId, null)
+    }
+  },
+  { immediate: true }
 )
 const isReplyLoading = computed(() => {
   const threadState = currentThreadState.value
@@ -2502,18 +2543,25 @@ const buildOptimisticHumanMessage = ({
 // 发送 runs 前先在前端插入一条用户消息，避免等待 worker 轮询后消息才出现。
 const insertOptimisticHumanMessage = (
   threadState,
-  { requestId, text, imageContent = null, attachments = [] }
+  { requestId, text, imageContent = null, attachments = [], queued = false }
 ) => {
   if (!threadState || !requestId) return
-  threadState.pendingRequestId = requestId
+  if (!queued) threadState.pendingRequestId = requestId
   threadState.replyLoadingVisible = false
   threadState.runFailureMessage = ''
-  threadState.traceEvents = []
-  threadState.runtimeSnapshot = null
-  threadState.runtimeDiagnostics = []
-  threadState.onGoingConv.msgChunks[requestId] = [
-    buildOptimisticHumanMessage({ requestId, text, imageContent, attachments })
-  ]
+  if (!queued) {
+    threadState.traceEvents = []
+    threadState.runtimeSnapshot = null
+    threadState.runtimeDiagnostics = []
+    threadState.onGoingConv.msgChunks[requestId] = [
+      buildOptimisticHumanMessage({ requestId, text, imageContent, attachments })
+    ]
+  } else {
+    threadState.queuedMessageProjections = [
+      ...(threadState.queuedMessageProjections || []),
+      buildOptimisticHumanMessage({ requestId, text, imageContent, attachments })
+    ]
+  }
 }
 
 const markAttachmentsRequestId = (threadId, attachments, requestId) => {
@@ -3068,10 +3116,19 @@ const {
     }
   },
   onTerminalDetected: ({ threadId, runId, touchedThreadIds = [] }) => {
+    // 运行开始时侧栏会显示 loading；终态必须立即清除，否则旧状态会一直保留到下一次刷新。
+    const terminalThreads = new Set([threadId, ...touchedThreadIds].filter(Boolean))
+    terminalThreads.forEach((id) => {
+      chatThreadsStore.setThreadStatus(
+        id,
+        id === chatState.currentThreadId ? null : 'ready'
+      )
+    })
     if (approvalState.threadId === threadId || touchedThreadIds.includes(approvalState.threadId)) {
       hideApprovalState()
     }
     void resumeQueuedRequestsForThread(threadId)
+    void drainLocalMessageQueue(threadId)
     // 仅当终态事件属于当前正在查看的线程时才自动标记已读；后台线程保留 ready 态
     if (runId && threadId === chatState.currentThreadId) {
       void chatThreadsStore.markThreadViewed(threadId)
@@ -3107,11 +3164,85 @@ const handleCancelQueuedRequest = async (requestId) => {
   if (!threadId || !requestId || cancellingRequestIds.has(requestId)) return
 
   cancellingRequestIds.add(requestId)
+  const ts = getThreadState(threadId)
+  const localRequest = (ts?.pendingMessageQueue || []).find(
+    (request) => request.request_id === requestId
+  )
+  if (localRequest) {
+    ts.pendingMessageQueue = ts.pendingMessageQueue.filter(
+      (request) => request.request_id !== requestId
+    )
+    ts.queuedMessageProjections = (ts.queuedMessageProjections || []).filter(
+      (queuedMessage) => queuedMessage?.extra_metadata?.request_id !== requestId
+    )
+    cancellingRequestIds.delete(requestId)
+    message.success('已删除排队请求')
+    return
+  }
   const cancelled = await cancelRequest(threadId, requestId)
   cancellingRequestIds.delete(requestId)
   if (cancelled) {
     await resumeQueuedRequestsForThread(threadId)
     message.success('已删除排队请求')
+  }
+}
+
+// 普通连续消息只在当前 run 结束后提交，避免并发创建 run 触发后端的单活跃 run约束。
+const drainLocalMessageQueue = async (threadId) => {
+  const ts = getThreadState(threadId)
+  if (!ts || ts.localQueueDrainInFlight || ts.activeRunId || !ts.pendingMessageQueue?.length) {
+    return
+  }
+
+  const nextRequest = ts.pendingMessageQueue[0]
+  if (!nextRequest || nextRequest.status === 'failed') return
+  ts.localQueueDrainInFlight = true
+  ts.queuedMessageProjections = (ts.queuedMessageProjections || []).filter(
+    (queuedMessage) => queuedMessage?.extra_metadata?.request_id !== nextRequest.request_id
+  )
+
+  try {
+    const runResp = await agentApi.createAgentRun({
+      query: nextRequest.text,
+      agent_slug: nextRequest.agentSlug,
+      thread_id: threadId,
+      meta: {
+        request_id: nextRequest.request_id,
+        attachment_file_ids: nextRequest.attachmentFileIds || [],
+        ui_mode: uiMode.value
+      },
+      image_content: nextRequest.imageContent,
+      model_spec: nextRequest.modelSpec,
+      tool_approval_mode: nextRequest.toolApprovalMode,
+      queue_policy: 'enqueue'
+    })
+    if (!runResp?.run_id) throw new Error('创建排队消息 run 失败：缺少 run_id')
+
+    ts.pendingMessageQueue.shift()
+    insertOptimisticHumanMessage(ts, {
+      requestId: nextRequest.request_id,
+      text: nextRequest.text,
+      imageContent: nextRequest.imageContent,
+      attachments: nextRequest.attachments,
+      queued: false
+    })
+    ts.isStreaming = true
+    await startRunStream(threadId, runResp.run_id, 0)
+  } catch (error) {
+    nextRequest.status = 'failed'
+    nextRequest.error = error?.message || '发送失败'
+    ts.queuedMessageProjections = [
+      ...(ts.queuedMessageProjections || []),
+      buildOptimisticHumanMessage({
+        requestId: nextRequest.request_id,
+        text: nextRequest.text,
+        imageContent: nextRequest.imageContent,
+        attachments: nextRequest.attachments
+      })
+    ]
+    handleChatError(error, 'send')
+  } finally {
+    ts.localQueueDrainInFlight = false
   }
 }
 
@@ -3300,8 +3431,7 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
     (!text && !image) ||
     !currentAgent.value ||
     sendCooldownActive.value ||
-    props.sendDisabled ||
-    isWaitingForUserAction.value
+    props.sendDisabled
   )
     return
 
@@ -3333,8 +3463,9 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
   const threadState = getThreadState(threadId)
   if (!threadState) return
   const hadActiveRun = Boolean(threadState.activeRunId && threadState.isStreaming)
-  threadState.pendingInterrupt = null
-  if (approvalState.threadId === threadId) {
+  // 审批/追问中的当前 Run 保留在顶部；新消息只进入队列，不覆盖中断状态。
+  if (!isWaitingForUserAction.value) threadState.pendingInterrupt = null
+  if (approvalState.threadId === threadId && !isWaitingForUserAction.value) {
     hideApprovalState()
   }
 
@@ -3353,19 +3484,52 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
 
   const requestId = createClientRequestId()
   const previousAttachments = markAttachmentsRequestId(threadId, pendingAttachments, requestId)
-  if (!hadActiveRun) {
-    resetOnGoingConv(threadId)
+  const waitingForCurrentRun = Boolean(
+    threadState.activeRunId &&
+      (threadState.isStreaming || threadState.pendingInterrupt || isWaitingForUserAction.value)
+  )
+  if (waitingForCurrentRun) {
+    const queuedAttachments = pendingAttachments.map((attachment) => ({
+      ...attachment,
+      request_id: requestId
+    }))
     insertOptimisticHumanMessage(threadState, {
       requestId,
       text,
       imageContent,
-      attachments: pendingAttachments.map((attachment) => ({
-        ...attachment,
-        request_id: requestId
-      }))
+      attachments: queuedAttachments,
+      queued: true
     })
-    threadState.isStreaming = true
+    threadState.pendingMessageQueue = [
+      ...(threadState.pendingMessageQueue || []),
+      {
+        request_id: requestId,
+        text,
+        imageContent,
+        attachments: queuedAttachments,
+        attachmentFileIds: pendingAttachmentFileIds,
+        agentSlug: currentAgentId.value,
+        modelSpec,
+        toolApprovalMode,
+        status: 'queued'
+      }
+    ]
+    return
   }
+  if (!hadActiveRun) {
+    resetOnGoingConv(threadId)
+  }
+  insertOptimisticHumanMessage(threadState, {
+    requestId,
+    text,
+    imageContent,
+    attachments: pendingAttachments.map((attachment) => ({
+      ...attachment,
+      request_id: requestId
+    })),
+    queued: hadActiveRun
+  })
+  if (!hadActiveRun) threadState.isStreaming = true
 
   try {
     const runResp = await agentApi.createAgentRun({
@@ -3374,7 +3538,8 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
       thread_id: threadId,
       meta: {
         request_id: requestId,
-        attachment_file_ids: pendingAttachmentFileIds
+        attachment_file_ids: pendingAttachmentFileIds,
+        ui_mode: uiMode.value
       },
       image_content: imageContent,
       model_spec: modelSpec,
@@ -4411,7 +4576,7 @@ watch(currentChatId, (threadId, oldThreadId) => {
     .queued-request-row {
       min-height: 28px;
       display: grid;
-      grid-template-columns: 18px minmax(0, 1fr) auto;
+      grid-template-columns: 18px minmax(0, 1fr) auto auto;
       gap: 10px;
       align-items: center;
       padding: 0 4px 0 6px;
@@ -4452,6 +4617,12 @@ watch(currentChatId, (threadId, oldThreadId) => {
         color: var(--gray-400);
         font-size: 14px;
       }
+    }
+
+    .queued-request-status {
+      color: var(--gray-500);
+      font-size: 12px;
+      white-space: nowrap;
     }
 
     .queued-request-actions {

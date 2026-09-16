@@ -246,6 +246,13 @@ class AgentRuntimeAssembler:
         except Exception as exc:  # noqa: BLE001
             # 资源准备失败必须留下诊断，不能把失败伪装成“没有配置 Skill”。
             logger.warning("Agent Skill resource preparation failed: %s", exc)
+            requested_skills = getattr(context, "skills", None)
+            if requested_skills:
+                raise RuntimeAssemblyError(RuntimeDiagnostic(
+                    code="SKILL_PREPARATION_FAILED",
+                    message=f"已配置 Skill 装配失败：{str(exc)[:400]}",
+                    severity="error", resource_kind="skills", recoverable=False,
+                )) from exc
             context._effective_skill_slugs = []
             context._runtime_skills = {}
             context._preloaded_skills = []
@@ -668,7 +675,19 @@ class AgentRuntimeAssembler:
         }
         for tool in tools:
             slug = str(getattr(tool, "name", "") or "").strip()
-            if not slug or slug in descriptors:
+            if not slug:
+                continue
+            schema = (
+                tool.args_schema.model_json_schema()
+                if getattr(tool, "args_schema", None)
+                and hasattr(tool.args_schema, "model_json_schema")
+                else {}
+            )
+            if slug in descriptors:
+                # 注册表中的静态描述可能只有展示信息；运行快照必须携带
+                # 本次实际工具实例的 schema，避免模型/Trace 看到 {}。
+                if schema and not descriptors[slug].get("input_schema"):
+                    descriptors[slug]["input_schema"] = schema
                 continue
             server = mcp_names.get(slug)
             metadata = getattr(tool, "metadata", {}) or {}
@@ -685,12 +704,7 @@ class AgentRuntimeAssembler:
                 configurable=False,
                 visible=False,
                 risk_level="read",
-                input_schema=(
-                    tool.args_schema.model_json_schema()
-                    if getattr(tool, "args_schema", None)
-                    and hasattr(tool.args_schema, "model_json_schema")
-                    else {}
-                ),
+                input_schema=schema,
                 metadata={"server_slug": server or ""},
             ).to_dict()
         return descriptors

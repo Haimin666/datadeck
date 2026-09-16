@@ -5,7 +5,6 @@ import uuid
 import asyncio
 import json
 import os
-import shlex
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -215,17 +214,11 @@ def build_agent_runtime_tools(context, user: User) -> list:
     )
 
     async def execute(command: str, timeout: int = 60) -> dict:
-        """在当前用户当前项目目录执行一个非 shell 命令。"""
+        """在当前用户当前项目目录执行命令，支持常见 Shell 语法。"""
         if not tool_allowed_by_runtime_permissions(context, "execute"):
             raise ValueError("当前角色没有个人空间模块权限")
         raw_command = str(command or "").strip()
         if not raw_command:
-            raise ValueError("command 不能为空")
-        try:
-            argv = shlex.split(raw_command)
-        except ValueError as exc:
-            raise ValueError(f"command 格式非法: {exc}") from exc
-        if not argv:
             raise ValueError("command 不能为空")
         try:
             safe_timeout = min(max(int(timeout or 60), 1), 120)
@@ -236,8 +229,8 @@ def build_agent_runtime_tools(context, user: User) -> list:
             raise ValueError("当前会话没有授权项目工作目录")
         temporary_root = getattr(getattr(context, "workdir", None), "host_root", None)
         cwd = temporary_root or user_workdir_host_dir(str(user.uid), workdir_path)
-        process = await asyncio.create_subprocess_exec(
-            *argv,
+        process = await asyncio.create_subprocess_shell(
+            raw_command,
             cwd=os.fspath(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -389,7 +382,25 @@ def build_agent_runtime_tools(context, user: User) -> list:
                 presented.append(path)
             except (OSError, ValueError) as exc:
                 errors.append({"path": path, "error": str(exc)[:300]})
-        return {"ok": bool(presented) and not errors, "filepaths": presented, "errors": errors}
+        result = {"ok": bool(presented) and not errors, "filepaths": presented, "errors": errors}
+        presented_paths = getattr(context, "_presented_artifact_paths", None)
+        if presented_paths is not None:
+            presented_paths.update(presented)
+        run_id = str(getattr(context, "run_id", "") or "").strip()
+        if presented and run_id:
+            # 文件已复制到线程制品目录后再发送独立事件，简化版对话可以
+            # 直接把它渲染为消息附件；完整页面继续使用原有文件栏。
+            from server.event_translator import append_event
+
+            await append_event(
+                run_id,
+                "artifact",
+                {"run_id": getattr(context, "run_id", ""),
+                 "request_id": getattr(context, "request_id", ""),
+                 "message_id": f"{run_id}-ai", "artifacts": presented},
+                thread_id,
+            )
+        return result
 
     async def metric_lookup(query: str, limit: int = 5) -> dict:
         """从已审核 Ossie 指标中按名称/别名/定义识别业务指标。"""
@@ -842,7 +853,7 @@ def build_agent_runtime_tools(context, user: User) -> list:
 
     tools = [
         StructuredTool.from_function(coroutine=execute, name="execute",
-                                     description="在当前项目工作目录执行一个命令（例如 python script.py）；不支持 shell 管道，默认需要人工审批。"),
+                                     description="在当前项目工作目录执行命令（例如 python script.py）；支持管道、重定向、&& 和 here-doc，默认需要人工审批。"),
         StructuredTool.from_function(coroutine=run_skill_script, name="run_skill_script",
                                      description="执行当前已挂载 Skill 的 scripts/ 下 Python 或 Shell 脚本；不允许任意路径，默认需要人工审批。"),
         StructuredTool.from_function(coroutine=present_artifacts, name="present_artifacts",

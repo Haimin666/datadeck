@@ -115,7 +115,15 @@ export class MessageProcessor {
     const artifacts = []
     const seenPaths = new Set()
     for (const message of conv.messages) {
-      if (message?.type !== 'ai' || !Array.isArray(message.tool_calls)) continue
+      if (message?.type !== 'ai') continue
+
+      for (const filepath of Array.isArray(message.artifacts) ? message.artifacts : []) {
+        const normalizedPath = typeof filepath === 'string' ? filepath.trim() : ''
+        if (!normalizedPath || seenPaths.has(normalizedPath)) continue
+        seenPaths.add(normalizedPath)
+        artifacts.push(normalizedPath)
+      }
+      if (!Array.isArray(message.tool_calls)) continue
 
       for (const toolCall of message.tool_calls) {
         const toolName = toolCall?.name || toolCall?.function?.name
@@ -362,10 +370,17 @@ export class MessageProcessor {
    * @returns {Object|null} 合并后的消息
    */
   static mergeMessageChunk(chunks) {
-    if (chunks.length === 0) return null
+    if (!Array.isArray(chunks)) return null
+
+    // SSE 重连、终态刷新和队列消息合并期间可能出现空块；忽略无效块，
+    // 避免对 undefined 执行 JSON.stringify/JSON.parse 导致整个对话页面崩溃。
+    const validChunks = chunks.filter(
+      (chunk) => chunk !== null && typeof chunk === 'object'
+    )
+    if (validChunks.length === 0) return null
 
     // 深拷贝第一个chunk作为结果
-    const result = JSON.parse(JSON.stringify(chunks[0]))
+    const result = JSON.parse(JSON.stringify(validChunks[0]))
 
     // 处理用户消息的内容格式 - 确保显示纯文本
     if (result.type === 'human' || result.role === 'user') {
@@ -381,8 +396,8 @@ export class MessageProcessor {
     }
 
     // 合并后续chunks
-    for (let i = 1; i < chunks.length; i++) {
-      const chunk = chunks[i]
+    for (let i = 1; i < validChunks.length; i++) {
+      const chunk = validChunks[i]
 
       // 合并内容
       if (chunk.content) {

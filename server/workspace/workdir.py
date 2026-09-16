@@ -35,12 +35,14 @@ class Workdir:
         """把 Workdir scope 路径解析为 UserWorkspace scope 路径。"""
         raw = str(path or "/").strip() or "/"
         pure = PurePosixPath(raw)
-        if not pure.is_absolute() or ".." in pure.parts or "\\" in raw or "://" in raw:
+        # Agent 和文件 API 可能分别传入 `outputs/a.py` 与
+        # `/outputs/a.py`；两者都表示当前 Workdir 内的虚拟路径。
+        if ".." in pure.parts or "\\" in raw or "://" in raw:
             raise ValueError("invalid Workdir scope path")
-        normalized = pure.as_posix()
-        if normalized == "/":
+        parts = pure.parts[1:] if pure.is_absolute() else pure.parts
+        if not parts:
             return self.root_path
-        return f"{self.root_path}{normalized}"
+        return f"{self.root_path}/{'/'.join(parts)}"
 
     def scope_path(self, workspace_path: str) -> str:
         """把当前 Workdir 内的 UserWorkspace 路径转换为浏览 scope。"""

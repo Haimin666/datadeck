@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
@@ -125,8 +127,17 @@ class RuntimeResourceSnapshot:
             if item.status == "mounted" and (kind is None or item.kind == kind)
         )
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    @property
+    def fingerprint(self) -> str:
+        """稳定标识本次运行的资源与授权，不包含运行诊断时间等易变字段。"""
+        payload = self.to_dict(include_fingerprint=False)
+        payload.pop("diagnostics", None)
+        return hashlib.sha256(json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+        ).encode("utf-8")).hexdigest()
+
+    def to_dict(self, *, include_fingerprint: bool = True) -> dict[str, Any]:
+        result = {
             "schema_version": self.schema_version,
             "uid": self.uid,
             "agent_slug": self.agent_slug,
@@ -146,6 +157,9 @@ class RuntimeResourceSnapshot:
             "resources": [item.to_dict() for item in self.resources],
             "diagnostics": dict(self.diagnostics),
         }
+        if include_fingerprint:
+            result["fingerprint"] = self.fingerprint
+        return result
 
 
 @dataclass(frozen=True, slots=True)

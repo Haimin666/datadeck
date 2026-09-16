@@ -535,7 +535,11 @@ async def test_core_middlewares_are_not_gated_by_memory_store(monkeypatch):
         ChatBotContext(), model=object(), memory_store=None,
     )
 
-    assert middlewares == ["summary", "budget", "todo", "patch", "retry", "usage", "timeout"]
+    assert [type(item).__name__ if not isinstance(item, str) else item for item in middlewares] == [
+        "summary", "budget", "todo", "patch", "retry", "usage",
+        "ToolFailureGuardMiddleware", "timeout",
+        "ToolResultTrustBoundaryMiddleware",
+    ]
 
 
 async def _none_async():

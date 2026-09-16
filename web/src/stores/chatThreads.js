@@ -96,8 +96,8 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
       const statusById = new Map(fetchedThreads.map((thread) => [thread.id, thread.thread_status]))
       threads.value = threads.value.map((thread) => {
         const latestStatus = statusById.get(thread.id)
-        if (!latestStatus) return thread
-        return { ...thread, thread_status: latestStatus }
+        // 列表接口未提供运行态时也要清除客户端残留的 loading，不能永久保留旧值。
+        return { ...thread, thread_status: latestStatus || null }
       })
     } catch (error) {
       console.warn('Failed to sync thread statuses:', error)

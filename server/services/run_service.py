@@ -22,6 +22,10 @@ from server.db import async_session_factory
 from server.event_translator import append_event, consume_graph_stream
 from server.models import AgentRun, User
 from server.services.agents_provider import get_agent
+from server.services.attachment_service import (
+    capture_runtime_artifacts_snapshot,
+    collect_runtime_artifacts,
+)
 from server.services.agent_runtime_contract import RuntimeAssemblyError
 from server.utils.datetime_utils import utc_now_naive
 from datadeck import logger
@@ -59,10 +63,110 @@ def _remove_running_task(run_id: str, task: asyncio.Task) -> None:
 def _agent_run_timeout_seconds() -> float:
     """限制单次 Agent 图执行时长，避免后台任务永久占用并让前端无限等待。"""
     try:
-        value = float(os.getenv("DATADECK_AGENT_RUN_TIMEOUT", "180"))
+        value = float(os.getenv("DATADECK_AGENT_RUN_TIMEOUT", "600"))
     except (TypeError, ValueError):
-        value = 180.0
+        value = 600.0
     return max(value, 1.0)
+
+
+def _format_timeout_progress(
+    events: list[tuple[str, object]], timeout_seconds: float, error_message: str,
+) -> str:
+    """从已落库事件生成超时前的可读进度，不再额外调用模型。"""
+    latest_state: dict = {}
+    recent_tools: list[str] = []
+    for event_type, raw_payload in events:
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        if event_type == "custom":
+            state = payload.get("agent_state")
+            if not isinstance(state, dict):
+                chunk = payload.get("chunk") if isinstance(payload.get("chunk"), dict) else {}
+                state = chunk.get("agent_state") if isinstance(chunk.get("agent_state"), dict) else {}
+            if state:
+                latest_state = state
+        if event_type != "messages":
+            continue
+        chunk = payload.get("chunk") if isinstance(payload.get("chunk"), dict) else {}
+        stream_event = chunk.get("stream_event") if isinstance(chunk.get("stream_event"), dict) else {}
+        if stream_event.get("type") != "tool_call":
+            continue
+        name = str(stream_event.get("name") or "").strip()
+        if name and name not in recent_tools:
+            recent_tools.append(name)
+
+    todos = latest_state.get("todos") if isinstance(latest_state, dict) else None
+    completed = [str(item.get("content") or "").strip() for item in (todos or [])
+                 if isinstance(item, dict) and item.get("status") == "completed" and item.get("content")]
+    in_progress = [str(item.get("content") or "").strip() for item in (todos or [])
+                   if isinstance(item, dict) and item.get("status") == "in_progress" and item.get("content")]
+    return "\n".join([
+        f"本次 Agent 运行已达到 {int(timeout_seconds)} 秒上限，已停止继续执行。",
+        "",
+        "当前进度：",
+        f"- 已完成：{'；'.join(completed[-5:]) if completed else '暂无结构化任务记录'}",
+        f"- 进行中：{'；'.join(in_progress[-3:]) if in_progress else '暂无明确进行中的任务'}",
+        f"- 最近调用工具：{'、'.join(recent_tools[-5:]) if recent_tools else '暂无工具调用记录'}",
+        f"- 终止原因：{error_message}",
+        "",
+        "如需继续，请根据以上进度重新发起任务。",
+    ])
+
+
+async def _append_timeout_progress_report(
+    run_id: str, thread_id: str, timeout_seconds: float, error_message: str,
+) -> None:
+    """把超时前的 Todo/工具进度作为助手消息发送给前端并落库。"""
+    async with async_session_factory() as db:
+        result = await db.execute(sa_text(
+            "SELECT request_id FROM agent_runs WHERE id=:rid"
+        ), {"rid": run_id})
+        request_id = result.scalar_one_or_none()
+        result = await db.execute(sa_text(
+            "SELECT event_type, payload FROM run_events "
+            "WHERE run_id=:rid ORDER BY seq ASC"
+        ), {"rid": run_id})
+        events = [(row[0], row[1]) for row in result.fetchall()]
+    content = _format_timeout_progress(events, timeout_seconds, error_message)
+    await append_event(run_id, "messages", {
+        "chunk": {
+            "status": "loading",
+            "type": "ai",
+            "id": f"{run_id}-ai",
+            "request_id": request_id,
+            "thread_id": thread_id,
+            "stream_event": {
+                "type": "message_delta",
+                "message_id": f"{run_id}-ai",
+                "thread_id": thread_id,
+                "content": content,
+            },
+        },
+    }, thread_id)
+
+
+async def _auto_collect_compact_artifacts(context, run_id: str, thread_id: str, request_id: str) -> None:
+    """仅简化 UI 自动收集本次消息工作目录新增的文件。"""
+    if getattr(context, "ui_mode", "full") != "compact":
+        return
+    workdir = getattr(context, "workdir", None)
+    root = getattr(workdir, "host_root", None)
+    if root is None:
+        return
+    before = getattr(context, "_compact_artifact_snapshot", {})
+    paths = await asyncio.to_thread(
+        collect_runtime_artifacts, thread_id, str(root), before, request_id,
+    )
+    already_presented = set(getattr(context, "_presented_artifact_paths", set()) or set())
+    paths = [path for path in paths if path not in already_presented]
+    if not paths:
+        return
+    await append_event(run_id, "artifact", {
+        "run_id": run_id,
+        "request_id": request_id,
+        "message_id": f"{run_id}-ai",
+        "artifacts": paths,
+        "auto_collected": True,
+    }, thread_id)
 
 
 async def _claim_pending_run(run_id: str) -> bool:
@@ -350,7 +454,7 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
         context = agent.context_schema()
         configured_context = (agent_config or {}).get("context", agent_config or {})
         if isinstance(configured_context, dict):
-            context.update(configured_context)
+            context.update_from_dict(configured_context)
         context.update({
             "thread_id": thread_id,
             "uid": uid,
@@ -374,6 +478,7 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
             ]))
         run_meta = (input_payload or {}).get("meta") or {}
         if isinstance(run_meta, dict):
+            context.ui_mode = "compact" if run_meta.get("ui_mode") == "compact" else "full"
             attachment_ids = run_meta.get("attachment_file_ids")
             if isinstance(attachment_ids, (list, tuple)):
                 context.attachment_file_ids = [
@@ -404,6 +509,11 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
 
             context.workdir = open_temporary_workdir(str(uid), str(thread_id))
             context.workdir_path = context.workdir.relative_path
+        context._presented_artifact_paths = set()
+        if getattr(context, "ui_mode", "full") == "compact":
+            context._compact_artifact_snapshot = capture_runtime_artifacts_snapshot(
+                str(getattr(context.workdir, "host_root", ""))
+            )
         # 运行级资源只由宿主装配器解析一次；Agent 核心只消费 Context 快照。
         from server.services.agent_runtime_assembler import assemble_agent_runtime
         async with async_session_factory() as runtime_db:
@@ -418,6 +528,18 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
             snapshot = await assemble_agent_runtime(
                 context, db=runtime_db, user=runtime_user, agent_slug=agent_slug
             )
+            expected_snapshot_hash = (run_meta or {}).get("runtime_snapshot_hash")
+            if expected_snapshot_hash and expected_snapshot_hash != snapshot.fingerprint:
+                raise RuntimeError("RUNTIME_SNAPSHOT_INVALID: 运行资源快照已发生变化，请重新发起任务")
+            if not expected_snapshot_hash:
+                await runtime_db.execute(sa_text(
+                    "UPDATE agent_runs SET input_payload = "
+                    "(COALESCE(input_payload::jsonb, '{}'::jsonb) || "
+                    "jsonb_build_object('meta', COALESCE(input_payload::jsonb->'meta', '{}'::jsonb) || "
+                    "jsonb_build_object('runtime_snapshot_hash', CAST(:hash AS TEXT))))::json "
+                    "WHERE id=:rid"
+                ), {"hash": snapshot.fingerprint, "rid": run_id})
+                await runtime_db.commit()
             # 快照本身是 trace 的第一等事件，诊断事件单独发送便于前端筛选。
             await append_event(run_id, "runtime_snapshot", {
                 "run_id": run_id,
@@ -467,6 +589,7 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
                 ),
                 timeout=_agent_run_timeout_seconds(),
             )
+        await _auto_collect_compact_artifacts(context, run_id, thread_id, request_id)
     except asyncio.CancelledError:
         if _shutting_down:
             try:
@@ -475,8 +598,9 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
                 logger.warning("Could not finalize Agent run %s during shutdown: %s", run_id, exc)
         raise
     except asyncio.TimeoutError:
+        timeout_seconds = _agent_run_timeout_seconds()
         error_message = "Agent 运行超时：模型或工具在限定时间内没有返回"
-        logger.error(f"run {run_id} executor timed out after {_agent_run_timeout_seconds()}s")
+        logger.error(f"run {run_id} executor timed out after {timeout_seconds}s")
         async with async_session_factory() as db:
             await db.execute(sa_text(
                 "UPDATE agent_runs SET status='failed', error_type='TimeoutError', "
@@ -484,6 +608,16 @@ async def _execute_run(run_id: str, *, resume_command: Command | None = None) ->
                 "AND status NOT IN ('completed','failed','cancelled')"
             ), {"em": error_message, "now": utc_now_naive(), "rid": run_id})
             await db.commit()
+        try:
+            await _auto_collect_compact_artifacts(context, run_id, thread_id, request_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not auto-collect compact artifacts for %s: %s", run_id, exc)
+        try:
+            await _append_timeout_progress_report(
+                run_id, thread_id, timeout_seconds, error_message,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not append timeout progress report for %s: %s", run_id, exc)
         await append_event(run_id, "error", {
             "error": {"message": error_message, "type": "TimeoutError"},
         })

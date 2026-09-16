@@ -29,9 +29,12 @@ def _safe_component(value: str) -> str:
 def _safe_scope_path(path: str | None) -> Path:
     raw = str(path or "/").strip() or "/"
     pure = PurePosixPath(raw)
-    if not pure.is_absolute() or ".." in pure.parts or "\\" in raw or "://" in raw:
+    # 工具调用通常使用 `outputs/file.py`，而 API/UI 可能使用
+    # `/outputs/file.py`。两种写法都表示 Workdir 内的虚拟路径。
+    if ".." in pure.parts or "\\" in raw or "://" in raw:
         raise ValueError("invalid temporary Workdir path")
-    return Path(*pure.parts[1:]) if len(pure.parts) > 1 else Path()
+    parts = pure.parts[1:] if pure.is_absolute() else pure.parts
+    return Path(*parts) if parts else Path()
 
 
 @dataclass(frozen=True, slots=True)

@@ -162,7 +162,15 @@ LangGraph create_agent
 
 当前 Agent Loop 使用 LangGraph 标准循环，没有自定义主循环；正式运行按请求创建 Graph，工具错误/超时转换为可恢复的 ToolMessage，外部资源问题转换为结构化诊断。资源快照按请求生命周期创建，平台工具遵循显式白名单。
 
+上下文按“系统约束 → 当前用户请求 → 结构化任务事实 → 工具证据 → 用户记忆 → 历史摘要 → 普通历史”的优先级处理。单工具结果默认限制为 300 token，可用 `DATADECK_TOOL_RESULT_TOKEN_LIMIT` 调整（64～8000 token）；裁剪、摘要失败和恢复状态会通过 `agent_state`/Trace 记录。
+
+长期记忆按用户隔离，并支持 `project_id` 项目边界：全局记忆可在项目内复用，项目记忆只在当前项目可见；数据库迁移版本为 `20260916_0026`。
+
+显式配置的 Skill 如果装配失败会直接终止本次 Run，不会伪装成“未挂载”；运行资源快照带有稳定 fingerprint，审批恢复和重启恢复会校验快照一致性。
+
 Skill 脚本通过 `run_skill_script(skill_slug, script_path, script_args, timeout)` 进入统一运行时，不能直接执行任意宿主路径或 shell；生成到 `/outputs` 的文件再通过 `present_artifacts` 交付。默认审批模式下脚本执行仍需人工审批。
+
+工具失败保护同时按“工具+参数”和“工具”两个维度计数：同一参数连续失败 2 次，或同一工具不同参数累计失败 4 次，运行会停止并返回最后错误，避免 Agent 在错误路径上无限尝试。
 
 发布前验证：
 
@@ -220,7 +228,9 @@ pnpm lint:check
 - `DATADECK_EMBEDDING_API_URL`、`DATADECK_EMBEDDING_API_KEY`、`DATADECK_EMBEDDING_MODEL`：向量模型配置。
 - `DATADECK_SQL_DSN`、`DATADECK_SQL_DIALECT`：数据源和 SQL 方言。
 - `DATADECK_SQL_ALLOWED_SCHEMAS`、`DATADECK_SQL_DENIED_TABLES`、`DATADECK_SQL_DENIED_COLUMNS`：可选的 SQL schema/表/字段边界，逗号分隔。
-- `DATADECK_AGENT_RUN_TIMEOUT`：单次 Agent 最大运行时间，默认 180 秒。
+- `DATADECK_AGENT_RUN_TIMEOUT`：单次 Agent 最大运行时间，默认 600 秒（10 分钟）。超时会先输出已记录的 Todo、最近工具调用和终止原因。
+- `DATADECK_CONTEXT_OPERATIONAL_CAP`：单次运行的上下文预算上限，默认 256K；Agent 会根据模型的 `context_length` 动态计算输出预留、软预算、摘要阈值和硬上限。未提供模型元数据时按 128K 保守估算。
+- `DATADECK_MODEL_CONTEXT_WINDOW`、`DATADECK_MODEL_MAX_OUTPUT_TOKENS`：仅用于环境变量模型 Provider 的上下文和输出上限；数据库模型优先读取模型配置中的 `context_window/context_length`。
 - 工具调用超时时间：当前 Context 默认 120 秒，运行时会将其限制在 1～600 秒。
 
 所有密钥只放在 `.env` 或 `.env.docker`，不要提交到 Git。

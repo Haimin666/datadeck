@@ -36,6 +36,8 @@ class PlatformModelProvider(ModelProvider):
             api_key=info.api_key,
             proxy_url=info.proxy_url,
             temperature=float(os.getenv("DATADECK_MODEL_TEMPERATURE", "0.0") or 0.0),
+            context_window=getattr(info, "context_window", None),
+            max_output_tokens=getattr(info, "max_output_tokens", None),
         )
 
     def _get_cache_info(self, spec: str):

@@ -6,7 +6,8 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, or_, select as sa_select
+from sqlalchemy import or_, select as sa_select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.db import get_db
@@ -110,16 +111,10 @@ async def create_run(
         .order_by(AgentRun.created_at.desc())
         .limit(1)
     )
-    if active_status == "interrupted" and not body.resume:
-        raise HTTPException(status_code=409, detail="当前对话正在等待用户审批")
-    active_count = int(await db.scalar(
-        sa_select(func.count(AgentRun.id)).where(
-            AgentRun.thread_id == body.thread_id,
-            AgentRun.uid == current_user.uid,
-            AgentRun.status.in_(("pending", "running", "cancel_requested", "interrupted")),
-            *([AgentRun.id != body.resume] if body.resume else []),
-        )
-    ) or 0)
+    # 一个线程只允许一个活动 Run。连续消息由前端阻塞；即使多个请求同时
+    # 到达，也在插入前返回明确的冲突，而不是让数据库唯一索引冒泡成 500。
+    if active_status and not body.resume:
+        raise HTTPException(status_code=409, detail="上一条消息仍在处理中，请等待完成后再发送")
 
     try:
         run = await create_agent_run(
@@ -137,17 +132,23 @@ async def create_run(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except IntegrityError as exc:
+        await db.rollback()
+        if "uq_active_run_per_thread" in str(exc):
+            raise HTTPException(
+                status_code=409,
+                detail="上一条消息仍在处理中，请等待完成后再发送",
+            ) from exc
+        raise
 
-    queued = bool(active_status) and not body.resume and body.queue_policy != "direct"
-    if not queued:
-        await dispatch_run(run.id, resume_command=resume_command)
+    await dispatch_run(run.id, resume_command=resume_command)
     payload = run.to_dict()
     return {
         **payload,
         "run_id": run.id,
-        "status": "queued" if queued else run.status,
+        "status": run.status,
         "queue_policy": body.queue_policy,
-        "queue_position": active_count + 1 if queued else 1,
+        "queue_position": 1,
     }
 
 
