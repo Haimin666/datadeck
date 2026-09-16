@@ -2,7 +2,8 @@ FROM docker.m.daocloud.io/library/node:22.13-alpine AS frontend-builder
 
 WORKDIR /app/web
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
-RUN npm install --global pnpm@11.24.0 --registry=https://registry.npmmirror.com \
+RUN --mount=type=cache,id=datadeck-pnpm-store,target=/root/.local/share/pnpm/store \
+    npm install --global pnpm@11.24.0 --registry=https://registry.npmmirror.com \
     && pnpm config set registry https://registry.npmmirror.com \
     && pnpm install --frozen-lockfile
 COPY web/ ./
@@ -29,14 +30,16 @@ RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
 COPY pyproject.toml uv.lock README.md ./
 # 先用最小包骨架安装并缓存第三方依赖，Agent/RAG 源码变化不再触发全量下载。
 RUN mkdir -p src/datadeck && touch src/datadeck/__init__.py
-RUN python -m pip install --upgrade pip \
+RUN --mount=type=cache,id=datadeck-pip-cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip \
     && python -m pip install --index-url=https://pypi.tuna.tsinghua.edu.cn/simple \
         --default-timeout=120 --retries=12 'setuptools>=80' wheel \
     && python -m pip install --no-build-isolation .
 
 # 业务代码、迁移和可注入物料放在依赖层之后；本包重装不解析依赖。
 COPY src/ ./src/
-RUN python -m pip install --no-deps --no-build-isolation .
+RUN --mount=type=cache,id=datadeck-pip-cache,target=/root/.cache/pip \
+    python -m pip install --no-deps --no-build-isolation .
 COPY server/ ./server/
 COPY migrations/ ./migrations/
 COPY data_material/ ./data_material/
