@@ -45,6 +45,7 @@ check_pid_command() {
 check_tools() {
   [[ -x "$VENV_DIR/bin/python" ]] || die "未找到虚拟环境：$VENV_DIR，请先创建并安装项目依赖。"
   command -v node >/dev/null 2>&1 || die "未找到 node，请先安装 Node.js。"
+  command -v pnpm >/dev/null 2>&1 || die "未找到 pnpm，请先安装 pnpm。"
   [[ -d "$PROJECT_DIR/web/node_modules" ]] || die "前端依赖未安装，请执行：pnpm --dir web install"
 }
 
@@ -141,6 +142,8 @@ stop_one() {
 
 start() {
   check_tools
+  info "构建前端生产产物..."
+  pnpm --dir "$PROJECT_DIR/web" build
   stop_one "$BACKEND_PID" "server.main:app" "后端"
   stop_one "$FRONTEND_PID" "vite/bin/vite.js" "前端"
   stop_project_listener "${DATADECK_LOCAL_BACKEND_PORT:-8000}"

@@ -24,6 +24,7 @@ from server.deps import BUILTIN_ROLE_AGENT_SLUGS, BUILTIN_ROLE_PERMISSIONS  # no
 from server.routers import router  # noqa: E402
 from server.routers.run_router import run_router  # noqa: E402
 from server.utils.auth import hash_password  # noqa: E402
+from server.services.default_avatar import get_default_avatar  # noqa: E402
 
 
 async def _temporary_workdir_cleanup_loop():
@@ -127,7 +128,7 @@ async def lifespan(app: FastAPI):
         if not r.scalar_one_or_none():
             db.add(User(
                 username="admin", uid="admin", password_hash=hash_password("admin123456"),
-                role="superadmin",
+                role="superadmin", avatar=get_default_avatar(),
             ))
 
         from server.services.model_providers.service import (

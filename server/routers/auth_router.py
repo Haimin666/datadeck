@@ -14,6 +14,7 @@ from server.db import get_db
 from server.deps import BUILTIN_ROLE_PERMISSIONS, MODULE_PERMISSIONS, get_optional_user, get_required_user, get_role_permissions, normalize_module_permissions
 from server.models import Role, User, Agent
 from server.services.operation_log_service import log_operation
+from server.services.default_avatar import get_default_avatar
 from server.utils.auth import create_access_token, hash_password, verify_password
 from server.utils.datetime_utils import utc_now_naive
 
@@ -77,6 +78,7 @@ async def login_from_goai(
             uid=external_uid,
             password_hash=hash_password(secrets.token_urlsafe(32)),
             role="user",
+            avatar=get_default_avatar(),
         )
         db.add(user)
         try:
@@ -115,6 +117,7 @@ async def initialize(body: InitializeRequest, db: AsyncSession = Depends(get_db)
         uid=body.username,
         password_hash=hash_password(body.password),
         role=body.role,
+        avatar=get_default_avatar(),
     )
     db.add(user)
     await db.flush()
@@ -398,6 +401,7 @@ async def create_user(
         username=body.username, uid=body.username,
         password_hash=hash_password(body.password),
         role=body.role, domain=body.domain or "default",
+        avatar=get_default_avatar(),
     )
     db.add(user)
     await log_operation(db, current_user.id, "user.create", f"target_user={user.id};username={user.username};role={user.role};domain={user.domain}")
