@@ -20,7 +20,7 @@ from server.config import settings  # noqa: E402
 from datadeck import logger  # noqa: E402
 from server.db import async_session_factory, close_db  # noqa: E402
 from server.models import Agent, Role, User  # noqa: E402
-from server.deps import BUILTIN_ROLE_PERMISSIONS  # noqa: E402
+from server.deps import BUILTIN_ROLE_AGENT_SLUGS, BUILTIN_ROLE_PERMISSIONS  # noqa: E402
 from server.routers import router  # noqa: E402
 from server.routers.run_router import run_router  # noqa: E402
 from server.utils.auth import hash_password  # noqa: E402
@@ -84,11 +84,11 @@ async def lifespan(app: FastAPI):
         from sqlalchemy import select as sa_select
 
         builtin_roles = (
-            ("superadmin", "超级管理员", "拥有全部模块及系统管理权限"),
-            ("admin", "管理员", "可管理业务模块和用户"),
-            ("user", "普通用户", "可使用对话与个人空间"),
+            ("superadmin", "超级管理员", "拥有全部模块及系统管理权限", []),
+            ("admin", "管理员", "可管理业务模块和用户", []),
+            ("user", "普通用户", "使用简化对话入口和内置运营 Agent", BUILTIN_ROLE_AGENT_SLUGS["user"]),
         )
-        for slug, name, description in builtin_roles:
+        for slug, name, description, agent_slugs in builtin_roles:
             role = await db.get(Role, slug)
             if role is None:
                 db.add(Role(
@@ -96,30 +96,31 @@ async def lifespan(app: FastAPI):
                     name=name,
                     description=description,
                     permissions=BUILTIN_ROLE_PERMISSIONS[slug],
+                    agent_slugs=agent_slugs,
                     is_builtin=True,
                 ))
             else:
                 role.name = name
                 role.description = description
                 role.permissions = BUILTIN_ROLE_PERMISSIONS[slug]
+                role.agent_slugs = agent_slugs
                 role.is_builtin = True
 
-        # 确保内置 Agent 存在：通用对话助手 + 独立数据分析助手
-        r = await db.execute(sa_select(Agent).where(Agent.slug == "default-chatbot"))
-        if not r.scalar_one_or_none():
-            db.add(Agent(
-                id="default-chatbot", slug="default-chatbot", name="对话助手",
-                description="内置通用对话智能体，按实际挂载能力完成问答和任务协作",
-                backend_id="ChatbotAgent", is_builtin=True,
-            ))
-
-        r = await db.execute(sa_select(Agent).where(Agent.slug == "data-agent"))
-        if not r.scalar_one_or_none():
-            db.add(Agent(
-                id="data-agent", slug="data-agent", name="数据分析助手",
-                description="按知识库口径、元数据和只读 SQL 完成企业数据分析",
-                backend_id="DataAgent", is_builtin=True,
-            ))
+        # 确保内置 Agent 存在：通用对话、运营入口、数据分析。
+        builtin_agents = (
+            ("default-chatbot", "对话助手", "内置通用对话智能体，按实际挂载能力完成问答和任务协作", "ChatbotAgent"),
+            ("operations-agent", "运营助手", "面向普通用户的内置运营智能体，使用简化对话入口", "ChatbotAgent"),
+            ("data-agent", "数据分析助手", "按知识库口径、元数据和只读 SQL 完成企业数据分析", "DataAgent"),
+        )
+        for slug, name, description, backend_id in builtin_agents:
+            agent = await db.scalar(sa_select(Agent).where(Agent.slug == slug))
+            if agent is None:
+                db.add(Agent(
+                    id=slug, slug=slug, name=name, description=description,
+                    backend_id=backend_id, is_builtin=True,
+                ))
+            else:
+                agent.is_builtin = True
 
         # 确保至少有一个用户（开发环境）
         r = await db.execute(sa_select(User).where(User.is_deleted == 0).limit(1))

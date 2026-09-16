@@ -48,6 +48,20 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
+  async function loginFromGoai(externalUserId) {
+    try {
+      const data = await authApi.loginFromGoai(externalUserId)
+      if (uid.value && uid.value !== data.uid) {
+        useAgentStore().reset()
+      }
+      applySession(data)
+      return true
+    } catch (error) {
+      console.error('GoAI 登录错误:', error)
+      throw error
+    }
+  }
+
   function logout() {
     // 清除状态
     token.value = ''
@@ -231,6 +245,7 @@ export const useUserStore = defineStore('user', () => {
 
     // 方法
     login,
+    loginFromGoai,
     logout,
     initialize,
     checkFirstRun,

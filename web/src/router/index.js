@@ -207,6 +207,22 @@ router.beforeEach(async (to) => {
   const isAdmin = userStore.isAdmin
   const isSuperAdmin = userStore.isSuperAdmin
 
+  // GoAI 入口只传用户 ID；后端自动同步普通用户并签发现有 JWT。
+  // 处理成功后移除 query，避免刷新时重复交换登录态。
+  const isAgentChatRoute = to.path === '/agent' || to.path.startsWith('/agent/')
+  const goaiUserId = to.query.user_id ? String(to.query.user_id) : ''
+  if (isAgentChatRoute && goaiUserId) {
+    try {
+      if (!isLoggedIn || String(userStore.uid) !== goaiUserId) {
+        await userStore.loginFromGoai(goaiUserId)
+      }
+      return { path: '/agent', query: {}, replace: true }
+    } catch (error) {
+      console.error('GoAI 入口登录失败:', error)
+      return '/login'
+    }
+  }
+
   // 根路径是统一入口：已有登录态直接进入系统，未登录则展示登录页。
   if (to.path === '/' && isLoggedIn) {
     return '/agent'

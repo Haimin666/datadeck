@@ -185,6 +185,24 @@
                 <h1>{{ randomGreeting }}</h1>
               </div>
 
+              <div
+                v-if="!currentChatId && !conversations.length"
+                class="chat-quick-actions"
+                aria-label="常用功能"
+              >
+                <button
+                  v-for="action in quickActions"
+                  :key="action.label"
+                  type="button"
+                  class="chat-quick-action"
+                  :title="action.prompt"
+                  @click="useQuickAction(action.prompt)"
+                >
+                  <component :is="action.icon" :size="15" aria-hidden="true" />
+                  <span>{{ action.label }}</span>
+                </button>
+              </div>
+
               <section
                 v-if="currentQueuedRequests.length"
                 class="queued-request-panel"
@@ -874,6 +892,8 @@ import {
   ChevronDown,
   CornerDownRight,
   Folders,
+  BookOpen,
+  GitBranch,
   ListCollapse,
   Play,
   RefreshCw,
@@ -965,6 +985,7 @@ const infoStore = useInfoStore()
 const userStore = useUserStore()
 const canSelectProject = computed(() => userStore.canAccess('workspace'))
 const canConfigureApproval = computed(() => userStore.canAccess('extensions'))
+// 普通用户固定使用运营 Agent，并进入简化对话；管理员/高阶角色按 workspace 权限使用完整 UI。
 const canViewWorkspaceFiles = computed(() => userStore.canAccess('workspace'))
 // 简化 UI 的产物自动随消息交付；完整 UI 保持右侧文件栏行为。
 const uiMode = computed(() => (canViewWorkspaceFiles.value ? 'full' : 'compact'))
@@ -1002,6 +1023,44 @@ const greetingMessages = [
 
 // 随机选择一个打招呼文本
 const randomGreeting = greetingMessages[Math.floor(Math.random() * greetingMessages.length)]
+
+const quickActions = [
+  {
+    label: '查数据口径',
+    prompt: '请基于已审核的指标口径和业务文档，查询这个指标的定义、公式和统计范围：',
+    icon: BookOpen
+  },
+  {
+    label: '查数据血缘',
+    prompt: '请基于 OMD 元数据查询这张表的上游、下游和关键字段来源：',
+    icon: GitBranch
+  },
+  {
+    label: '查数据产出',
+    prompt: '请查询这张表或任务的产出周期、最近产出时间和运行情况：',
+    icon: Activity
+  },
+  {
+    label: '查数仓逻辑',
+    prompt: '请检索数仓代码，说明这张表的生成逻辑、字段加工和依赖任务：',
+    icon: ListCollapse
+  },
+  {
+    label: '查业务规则',
+    prompt: '请基于业务知识库和指标口径，查询这个业务规则；资料不足时请明确指出：',
+    icon: Folders
+  },
+  {
+    label: '生成 SQL',
+    prompt: '请结合已维护的指标口径、OMD 表结构血缘和数仓逻辑生成 SQL；无法确认的条件请先说明：',
+    icon: RefreshCw
+  }
+]
+
+const useQuickAction = (prompt) => {
+  userInput.value = prompt
+  nextTick(() => agentInputAreaRef.value?.focus?.())
+}
 
 // 业务状态（保留在组件本地）
 const chatState = reactive({
@@ -4313,6 +4372,38 @@ watch(currentChatId, (threadId, oldThreadId) => {
     font-size: 1.4rem;
     color: var(--gray-1000);
     margin: 0;
+  }
+}
+
+.chat-quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  max-width: 720px;
+  margin: 0 auto 16px;
+}
+
+.chat-quick-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--gray-200);
+  border-radius: 9px;
+  background: var(--gray-0);
+  color: var(--gray-700);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease;
+
+  &:hover,
+  &:focus-visible {
+    border-color: var(--main-400);
+    background: var(--main-30);
+    color: var(--main-700);
+    outline: none;
   }
 }
 

@@ -1,8 +1,9 @@
 """认证路由：登录、初始化管理员、/me、用户管理 CRUD。"""
 from __future__ import annotations
 
+import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
 from sqlalchemy import func as sa_func
@@ -43,6 +44,52 @@ async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = 
     user = result.scalar_one_or_none()
     if not user or not verify_password(form.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
+    user.last_login = utc_now_naive()
+    await db.commit()
+    token = create_access_token(str(user.id))
+    return TokenResponse(
+        access_token=token,
+        user_id=user.id,
+        username=user.username,
+        uid=user.uid,
+        role=user.role,
+        permissions=await get_role_permissions(db, user.role),
+    )
+
+
+@auth.get("/goai")
+async def login_from_goai(
+    user_id: str = Query(..., min_length=1, max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """GoAI 模块入口：按外部 user_id 自动进入普通用户对话。
+
+    该入口不改变本地登录体系。生产环境应仅通过 GoAI 的受信任反向代理暴露，
+    因为 user_id 本身不是密码或签名凭证。
+    """
+    external_uid = user_id.strip()
+    user = await db.scalar(
+        select(User).where(User.uid == external_uid, User.is_deleted == 0)
+    )
+    if user is None:
+        user = User(
+            username=external_uid,
+            uid=external_uid,
+            password_hash=hash_password(secrets.token_urlsafe(32)),
+            role="user",
+        )
+        db.add(user)
+        try:
+            await db.commit()
+            await db.refresh(user)
+        except Exception:
+            await db.rollback()
+            user = await db.scalar(
+                select(User).where(User.uid == external_uid, User.is_deleted == 0)
+            )
+            if user is None:
+                raise
+
     user.last_login = utc_now_naive()
     await db.commit()
     token = create_access_token(str(user.id))

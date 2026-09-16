@@ -13,9 +13,12 @@ function normalizeAgent(agent) {
 }
 
 export const BUILTIN_AGENT_ID = 'default-chatbot'
+export const OPERATIONS_AGENT_ID = 'operations-agent'
 
 export function isBuiltinAgent(agent) {
-  return agent?.is_builtin || agent?.id === BUILTIN_AGENT_ID || agent?.slug === BUILTIN_AGENT_ID
+  return agent?.is_builtin
+    || [BUILTIN_AGENT_ID, OPERATIONS_AGENT_ID].includes(agent?.id)
+    || [BUILTIN_AGENT_ID, OPERATIONS_AGENT_ID].includes(agent?.slug)
 }
 
 function sortAgents(agents) {

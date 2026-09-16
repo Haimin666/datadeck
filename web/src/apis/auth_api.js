@@ -39,6 +39,11 @@ async function login(credentials) {
   return apiPost('/api/auth/token', formData, {}, false)
 }
 
+async function loginFromGoai(userId) {
+  const params = new URLSearchParams({ user_id: String(userId) })
+  return apiGet(`/api/auth/goai?${params}`, {}, false)
+}
+
 async function initialize(admin) {
   return apiPost('/api/auth/initialize', admin, {}, false)
 }
@@ -109,6 +114,7 @@ async function approveCLIAuthSession(userCode) {
 
 export const authApi = {
   login,
+  loginFromGoai,
   initialize,
   checkFirstRun,
   getUsers,

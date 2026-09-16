@@ -25,7 +25,11 @@ AGENT_RUNTIME_MODULES = frozenset({
 BUILTIN_ROLE_PERMISSIONS = {
     "superadmin": sorted(MODULE_PERMISSIONS),
     "admin": ["conversations", "agents", "workspace", "knowledge", "extensions", "scheduled_tasks", "metrics", "settings", "users"],
-    "user": ["conversations", "workspace"],
+    # 普通用户是面向业务人员的简化入口：只能进入对话，固定使用运营 Agent。
+    "user": ["conversations"],
+}
+BUILTIN_ROLE_AGENT_SLUGS = {
+    "user": ["operations-agent"],
 }
 
 def normalize_module_permissions(permissions: list[str] | None) -> list[str]:
@@ -50,6 +54,8 @@ async def get_role_agent_slugs(db: AsyncSession, role_slug: str) -> set[str] | N
     """
     if role_slug == "superadmin":
         return None
+    if role_slug == "user":
+        return set(BUILTIN_ROLE_AGENT_SLUGS["user"])
     role = await db.get(Role, role_slug)
     if role is None:
         return None
