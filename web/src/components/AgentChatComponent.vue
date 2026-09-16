@@ -195,13 +195,74 @@
                   :key="action.label"
                   type="button"
                   class="chat-quick-action"
-                  :title="action.prompt"
-                  @click="useQuickAction(action.prompt)"
+                  :title="`查看「${action.label}」示例`"
+                  @click="openQuickAction(action)"
                 >
                   <component :is="action.icon" :size="15" aria-hidden="true" />
                   <span>{{ action.label }}</span>
                 </button>
               </div>
+
+              <Teleport to="body">
+                <Transition name="quick-example-modal" appear>
+                  <div
+                    v-if="selectedQuickAction"
+                    class="quick-example-overlay"
+                    role="presentation"
+                    @mousedown.self="closeQuickAction"
+                  >
+                    <section
+                      class="quick-example-modal"
+                      role="dialog"
+                      aria-modal="true"
+                      :aria-labelledby="`quick-example-title-${selectedQuickAction.label}`"
+                      @keydown.esc.prevent="closeQuickAction"
+                    >
+                      <header class="quick-example-header">
+                        <div class="quick-example-heading">
+                          <span class="quick-example-icon">
+                            <component :is="selectedQuickAction.icon" :size="18" aria-hidden="true" />
+                          </span>
+                          <div>
+                            <span class="quick-example-eyebrow">快捷场景示例</span>
+                            <h2 :id="`quick-example-title-${selectedQuickAction.label}`">
+                              {{ selectedQuickAction.label }}
+                            </h2>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          class="quick-example-close"
+                          aria-label="关闭示例"
+                          @click="closeQuickAction"
+                        >
+                          <X :size="18" />
+                        </button>
+                      </header>
+
+                      <p class="quick-example-description">{{ selectedQuickAction.description }}</p>
+                      <div class="quick-example-content">
+                        <div class="quick-example-label">可以这样问</div>
+                        <p>{{ selectedQuickAction.example }}</p>
+                      </div>
+                      <div class="quick-example-hint">
+                        <span class="quick-example-hint-dot"></span>
+                        插入后可以继续修改表名、时间范围或业务条件
+                      </div>
+                      <footer class="quick-example-actions">
+                        <button type="button" class="quick-example-secondary" @click="copyQuickAction">
+                          <Copy :size="15" />
+                          {{ quickActionCopied ? '已复制' : '复制示例' }}
+                        </button>
+                        <button type="button" class="quick-example-primary" @click="insertQuickAction">
+                          插入到对话框
+                          <CornerDownRight :size="15" />
+                        </button>
+                      </footer>
+                    </section>
+                  </div>
+                </Transition>
+              </Teleport>
 
               <section
                 v-if="currentQueuedRequests.length"
@@ -893,11 +954,13 @@ import {
   CornerDownRight,
   Folders,
   BookOpen,
+  Copy,
   GitBranch,
   ListCollapse,
   Play,
   RefreshCw,
-  Trash2
+  Trash2,
+  X
 } from '@lucide/vue'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
@@ -911,6 +974,7 @@ import RefsComponent from '@/components/RefsComponent.vue'
 import ToolCallsGroupComponent from '@/components/ToolCallsGroupComponent.vue'
 import ConversationProcessGroupComponent from '@/components/ConversationProcessGroupComponent.vue'
 import { handleChatError, handleValidationError } from '@/utils/errorHandler'
+import { copyTextToClipboard } from '@/utils/clipboard'
 import {
   DRAFT_THREAD_ID,
   createThreadDraftStore,
@@ -1027,38 +1091,70 @@ const randomGreeting = greetingMessages[Math.floor(Math.random() * greetingMessa
 const quickActions = [
   {
     label: '查数据口径',
-    prompt: '请基于已审核的指标口径和业务文档，查询这个指标的定义、公式和统计范围：',
+    description: '确认指标的业务含义、计算公式、统计范围和适用限制。',
+    example: '请查询“近30天逾期率”的已审核口径，说明定义、计算公式、分子分母、统计范围，以及是否包含展期订单。',
     icon: BookOpen
   },
   {
     label: '查数据血缘',
-    prompt: '请基于 OMD 元数据查询这张表的上游、下游和关键字段来源：',
+    description: '从 OMD 获取表级上下游依赖，并补充关键字段的来源链路。',
+    example: '请查询 lion_dw_app.app_atlas_gl_map_overdue_vin_df 的上游和下游，列出直接依赖表、关键字段来源及所属服务。',
     icon: GitBranch
   },
   {
     label: '查数据产出',
-    prompt: '请查询这张表或任务的产出周期、最近产出时间和运行情况：',
+    description: '查看数据每天是否按时产出、最近一次产出时间和任务运行状态。',
+    example: '请查询 lion_dw_app.app_atlas_gl_map_overdue_vin_df 最近7天的产出情况，包括产出时间、更新周期、任务状态和缺失日期。',
     icon: Activity
   },
   {
     label: '查数仓逻辑',
-    prompt: '请检索数仓代码，说明这张表的生成逻辑、字段加工和依赖任务：',
+    description: '检索数仓 SQL 和任务脚本，解释表是如何生成以及字段如何加工。',
+    example: '请检索数仓代码，说明 lion_dw_app.app_atlas_gl_map_overdue_vin_df 的生成逻辑、主要 JOIN 条件、字段加工和依赖任务。',
     icon: ListCollapse
   },
   {
     label: '查业务规则',
-    prompt: '请基于业务知识库和指标口径，查询这个业务规则；资料不足时请明确指出：',
+    description: '结合业务文档和已维护口径，定位规则来源并标出不确定之处。',
+    example: '请查询“逾期车辆如何进入风险名单”的业务规则，说明触发条件、例外情况、规则来源；资料不足的部分请明确标注。',
     icon: Folders
   },
   {
     label: '生成 SQL',
-    prompt: '请结合已维护的指标口径、OMD 表结构血缘和数仓逻辑生成 SQL；无法确认的条件请先说明：',
+    description: '先查真实口径、表结构和数仓逻辑，再生成可核对的查询 SQL。',
+    example: '请根据已审核口径，生成查询最近一个月各业务线逾期率的 Hive SQL，使用真实表和字段；如果字段或口径无法确认，请先列出待确认项。',
     icon: RefreshCw
   }
 ]
 
-const useQuickAction = (prompt) => {
-  userInput.value = prompt
+const selectedQuickAction = ref(null)
+const quickActionCopied = ref(false)
+
+const openQuickAction = (action) => {
+  selectedQuickAction.value = action
+  quickActionCopied.value = false
+}
+
+const closeQuickAction = () => {
+  selectedQuickAction.value = null
+  quickActionCopied.value = false
+}
+
+const copyQuickAction = async () => {
+  if (!selectedQuickAction.value) return
+  try {
+    await copyTextToClipboard(selectedQuickAction.value.example)
+    quickActionCopied.value = true
+    message.success('示例已复制')
+  } catch {
+    message.error('复制失败，请手动选择文本复制')
+  }
+}
+
+const insertQuickAction = () => {
+  if (!selectedQuickAction.value) return
+  userInput.value = selectedQuickAction.value.example
+  closeQuickAction()
   nextTick(() => agentInputAreaRef.value?.focus?.())
 }
 
@@ -4372,6 +4468,245 @@ watch(currentChatId, (threadId, oldThreadId) => {
     font-size: 1.4rem;
     color: var(--gray-1000);
     margin: 0;
+  }
+}
+
+.quick-example-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(31, 41, 55, 0.12);
+  backdrop-filter: blur(10px) saturate(115%);
+  -webkit-backdrop-filter: blur(10px) saturate(115%);
+}
+
+.quick-example-modal {
+  width: min(620px, 100%);
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: hidden;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--gray-0) 94%, transparent);
+  box-shadow:
+    0 24px 70px rgba(20, 27, 38, 0.12),
+    0 2px 12px rgba(255, 255, 255, 0.34) inset;
+  backdrop-filter: blur(18px) saturate(125%);
+  -webkit-backdrop-filter: blur(18px) saturate(125%);
+}
+
+.quick-example-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 28px 15px;
+}
+
+.quick-example-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.quick-example-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 11px;
+  color: var(--main-700);
+  background: var(--main-30);
+}
+
+.quick-example-eyebrow {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--gray-500);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
+.quick-example-header h2 {
+  margin: 0;
+  color: var(--gray-1000);
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.35;
+}
+
+.quick-example-close {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  color: var(--gray-500);
+  background: transparent;
+  cursor: pointer;
+}
+
+.quick-example-close:hover,
+.quick-example-close:focus-visible {
+  color: var(--gray-900);
+  background: var(--gray-100);
+  outline: none;
+}
+
+.quick-example-description {
+  max-width: 52em;
+  margin: 0;
+  padding: 0 28px 20px;
+  color: var(--gray-600);
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.quick-example-content {
+  margin: 0 28px;
+  padding: 17px 19px 18px;
+  border: 1px solid var(--gray-200);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--gray-50) 90%, transparent);
+}
+
+.quick-example-label {
+  margin-bottom: 8px;
+  color: var(--main-700);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.quick-example-content p {
+  margin: 0;
+  color: var(--gray-900);
+  font-size: 15px;
+  line-height: 1.9;
+  overflow-wrap: anywhere;
+}
+
+.quick-example-hint {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 14px 28px 4px;
+  color: var(--gray-500);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.quick-example-hint-dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--main-500);
+}
+
+.quick-example-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  padding: 22px 28px 28px;
+}
+
+.quick-example-secondary,
+.quick-example-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 9px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.quick-example-secondary {
+  border: 1px solid var(--gray-200);
+  color: var(--gray-700);
+  background: var(--gray-0);
+}
+
+.quick-example-secondary:hover,
+.quick-example-secondary:focus-visible {
+  border-color: var(--main-400);
+  color: var(--main-700);
+  background: var(--main-30);
+  outline: none;
+}
+
+.quick-example-primary {
+  border: 1px solid var(--main-600);
+  color: white;
+  background: var(--main-600);
+}
+
+.quick-example-primary:hover,
+.quick-example-primary:focus-visible {
+  border-color: var(--main-700);
+  background: var(--main-700);
+  outline: none;
+}
+
+.quick-example-modal-enter-active,
+.quick-example-modal-leave-active {
+  transition: opacity 180ms ease;
+}
+
+.quick-example-modal-enter-active .quick-example-modal,
+.quick-example-modal-leave-active .quick-example-modal {
+  transition: transform 180ms ease, opacity 180ms ease;
+}
+
+.quick-example-modal-enter-from,
+.quick-example-modal-leave-to {
+  opacity: 0;
+}
+
+.quick-example-modal-enter-from .quick-example-modal,
+.quick-example-modal-leave-to .quick-example-modal {
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+}
+
+@media (max-width: 600px) {
+  .quick-example-overlay {
+    padding: 14px;
+  }
+
+  .quick-example-header {
+    padding: 20px 20px 13px;
+  }
+
+  .quick-example-description {
+    padding: 0 20px 17px;
+  }
+
+  .quick-example-content {
+    margin: 0 20px;
+  }
+
+  .quick-example-hint {
+    align-items: flex-start;
+    padding: 13px 20px 3px;
+  }
+
+  .quick-example-actions {
+    padding: 19px 20px 20px;
+  }
+
+  .quick-example-secondary,
+  .quick-example-primary {
+    flex: 1;
   }
 }
 

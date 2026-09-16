@@ -72,6 +72,8 @@ async def login_from_goai(
     user = await db.scalar(
         select(User).where(User.uid == external_uid, User.is_deleted == 0)
     )
+    if user is not None and user.role != "user":
+        raise HTTPException(status_code=403, detail="该入口仅允许普通用户访问")
     if user is None:
         user = User(
             username=external_uid,
