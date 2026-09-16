@@ -26,6 +26,7 @@ web/dist/
 
 # Logs
 *.log
+# 本地临时文件（含旅行攻略等临时产出）
 /tmp/
 
 # IDE
